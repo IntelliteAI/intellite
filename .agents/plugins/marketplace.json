@@ -1,0 +1,20 @@
+{
+  "name": "intellite",
+  "interface": {
+    "displayName": "Intellite"
+  },
+  "plugins": [
+    {
+      "name": "intellite-methods",
+      "source": {
+        "source": "local",
+        "path": "./intellite-methods"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

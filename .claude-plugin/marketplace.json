@@ -1,0 +1,14 @@
+{
+  "name": "intellite",
+  "description": "Intellite plugin for Claude Code and Codex.",
+  "owner": {
+    "name": "Intellite"
+  },
+  "plugins": [
+    {
+      "name": "intellite-methods",
+      "source": "./intellite-methods",
+      "description": "Intellite MCP server, skill and Stack sync."
+    }
+  ]
+}

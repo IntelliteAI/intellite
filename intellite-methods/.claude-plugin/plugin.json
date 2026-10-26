@@ -1,0 +1,11 @@
+{
+  "name": "intellite-methods",
+  "description": "Intellite MCP server, skill and Stack sync.",
+  "version": "0.4.2",
+  "author": {
+    "name": "Intellite"
+  },
+  "homepage": "https://intellite.app/",
+  "repository": "https://github.com/IntelliteAI/intellite",
+  "license": "Apache-2.0"
+}

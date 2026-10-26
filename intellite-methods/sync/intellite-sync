@@ -1,0 +1,14 @@
+#!/bin/sh
+# Starts the Intellite sync. sh runs this file (macOS, Linux, Git Bash); PowerShell runs intellite-sync.cmd.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    script="$here/sync.ps1"
+    if command -v cygpath >/dev/null 2>&1; then script=$(cygpath -w "$script"); fi
+    exec powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$script" "$@" ;;
+esac
+if command -v perl >/dev/null 2>&1; then exec perl "$here/sync.pl" "$@"; fi
+# Without Perl nothing is synced, and a session starts with the skills as they are.
+if [ "$1" = "hook" ]; then exit 0; fi
+echo "intellite-sync needs Perl, which is not on this computer." >&2
+exit 1

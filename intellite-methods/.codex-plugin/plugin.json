@@ -1,0 +1,28 @@
+{
+  "name": "intellite-methods",
+  "version": "0.4.2",
+  "description": "Intellite MCP server, skill and Stack sync.",
+  "author": {
+    "name": "Intellite"
+  },
+  "homepage": "https://intellite.app/",
+  "repository": "https://github.com/IntelliteAI/intellite",
+  "license": "Apache-2.0",
+  "keywords": [
+    "intellite",
+    "methods",
+    "skills"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/codex.json",
+  "interface": {
+    "displayName": "Intellite",
+    "shortDescription": "Intellite MCP server, skill and Stack sync.",
+    "developerName": "Intellite",
+    "category": "Productivity",
+    "websiteURL": "https://intellite.app/",
+    "privacyPolicyURL": "https://intellite.app/privacy",
+    "termsOfServiceURL": "https://intellite.app/terms"
+  }
+}

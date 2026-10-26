@@ -1,0 +1,17 @@
+{
+  "description": "Intellite Stack sync (SessionStart).",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PLUGIN_ROOT}/sync\"; ./intellite-sync hook claude",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

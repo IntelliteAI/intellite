@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "intellite-methods": {
+      "type": "http",
+      "url": "https://intellite.app/apps/intellite-methods",
+      "oauth": {
+        "clientId": "intellite-methods-plugin",
+        "callbackUrl": "http://localhost:8976/callback",
+        "callbackPort": 8976
+      }
+    }
+  }
+}

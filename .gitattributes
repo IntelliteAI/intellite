@@ -1,0 +1,4 @@
+intellite-methods/sync/intellite-sync text eol=lf
+intellite-methods/sync/*.pl text eol=lf
+intellite-methods/sync/*.cmd text eol=crlf
+intellite-methods/sync/*.ps1 text eol=crlf
