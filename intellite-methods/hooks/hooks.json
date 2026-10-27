@@ -1,9 +1,9 @@
 {
-  "description": "Intellite Stack sync (SessionStart).",
+  "description": "Intellite Stack sync and instructions (SessionStart).",
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume",
+        "matcher": "startup|resume|clear|compact",
         "hooks": [
           {
             "type": "command",

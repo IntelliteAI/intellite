@@ -8,7 +8,7 @@
     {
       "name": "intellite-methods",
       "source": "./intellite-methods",
-      "description": "Intellite MCP server, skill and Stack sync."
+      "description": "Intellite MCP server, skill, Stack sync and instructions."
     }
   ]
 }

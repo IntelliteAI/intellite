@@ -1,9 +1,12 @@
 #!/usr/bin/perl
 # Intellite sync for macOS and Linux (Perl and curl).
 #   intellite-sync hook claude|codex     SessionStart hook: sync the Stack into the skills folder, print the hook output
+#                                        (instructions: given in full; hook input on stdin, cwd)
 #   intellite-sync connect               OAuth 2.0 authorization code, PKCE, loopback redirect; scope methods.stack.read
 #   intellite-sync status
 #   intellite-sync disconnect <id>       revoke the connection, remove its skills
+#   intellite-sync assign <id> <folder>  give an organization's instructions in <folder> (two organizations or more)
+#   intellite-sync unassign <id> <folder>
 # Refresh tokens: Keychain (macOS), Secret Service (Linux) or a file only this user reads; never printed, logged or put
 # on a command line. Same records and output as sync.ps1.
 use strict;
@@ -27,6 +30,9 @@ my $SCOPE = 'methods.stack.read';
 my $STARTED = time;
 # A session waits for its start hooks: past this, the session starts with the skills as they are.
 my $BUDGET = 10;
+# The characters of the instructions given at the start of a session: Claude Code takes up to 10,000 from a hook, and
+# what changed and the notes need room too.
+my $INSTRUCTION_BUDGET = 8000;
 my $JSON = JSON::PP->new->utf8->canonical->pretty;
 my $ASCII = JSON::PP->new->ascii->canonical;
 
@@ -226,6 +232,90 @@ sub access_token {
   return ('', ($answer->{status} == 400 || $answer->{status} == 401) ? 1 : 0);
 }
 
+# --- the instructions each connection gave ------------------------------------------------------------------------------
+
+sub instructions_path { my ($id) = @_; return File::Spec->catfile($ROOT, "instructions-$id.json"); }
+sub instructions_of { my ($id) = @_; my $list = read_json(instructions_path($id), []); return ref $list eq 'ARRAY' ? $list : []; }
+sub utf8_sha { my ($text) = @_; my $bytes = $text // ''; utf8::encode($bytes); return sha256_hex($bytes); }
+# Keeps what the list gave, each checked against its SHA-256: a text that does not match is not kept.
+sub save_instructions {
+  my ($id, $list) = @_;
+  my @kept;
+  for my $item (@{ $list // [] }) {
+    if (utf8_sha($item->{text}) ne ($item->{sha256} // '')) { log_line("instruction $item->{name} $item->{version}: the text does not match its SHA-256"); next; }
+    push @kept, { map { ($_ => $item->{$_}) } qw(name methodId version title organization digest text) };
+  }
+  write_json(instructions_path($id), \@kept);
+}
+
+# The folder the session works in, from the hook's input on stdin (Claude Code and Codex send its cwd). Read for at most
+# a second and a half, so that a hook started without input does not wait.
+sub session_folder {
+  return '' if -t STDIN;
+  my $select = IO::Select->new(\*STDIN);
+  my ($raw, $until) = ('', time + 1.5);
+  while (time < $until) {
+    last unless $select->can_read($until - time);
+    my $got = sysread(STDIN, my $chunk, 65536);
+    last unless $got;
+    $raw .= $chunk;
+  }
+  my $input = decode_json_text($raw);
+  return ref $input eq 'HASH' ? ($input->{cwd} // '') : '';
+}
+sub within {
+  my ($place, $parent) = @_;
+  return 0 unless length($place // '') && length($parent // '');
+  my ($child, $root) = map { my $path = File::Spec->rel2abs($_); $path =~ s{/+$}{}; "$path/" } ($place, $parent);
+  ($child, $root) = (lc $child, lc $root) if $^O eq 'darwin';
+  return index($child, $root) == 0;
+}
+
+# The instructions for a session in that folder: an organization's first, then the user's own. An organization's are
+# given everywhere while it is the only organization connected and no folder is assigned to it; otherwise only in the
+# folders assigned to it, so that one organization's instructions never reach another's work.
+sub session_instructions {
+  my ($folder, $notes) = @_;
+  my $connections = connections();
+  my $is_organization = sub { my ($connection) = @_; return ($connection->{workspace} && ($connection->{workspace}{kind} // '') eq 'organization') ? 1 : 0; };
+  my @organizations = grep { $is_organization->($_) } @$connections;
+  my (@given, @withheld);
+  for my $connection (@organizations, grep { !$is_organization->($_) } @$connections) {
+    my $items = instructions_of($connection->{id});
+    next unless @$items;
+    if ($is_organization->($connection)) {
+      my @folders = grep { length($_ // '') } @{ $connection->{folders} // [] };
+      my $applies = 0;
+      if (@folders) { $applies = 1 if grep { within($folder, $_) } @folders; }
+      elsif (@organizations == 1) { $applies = 1; }
+      else { push @withheld, $connection; }
+      next unless $applies;
+    }
+    push @given, @$items;
+  }
+  if (@withheld) {
+    my $ids = join(', ', map { "$_->{id} ($_->{label})" } @withheld);
+    push @$notes, { key => 'unassigned', daily => 1, text => "Intellite: the instructions of $ids are not given in this session, because more than one organization is connected and this folder is not assigned to one of them. When the user works for one of them here, with their consent, run: " . program_command() . ' assign <id> "<folder>"' };
+  }
+  return \@given;
+}
+
+sub instruction_text {
+  my ($items) = @_;
+  return '' unless @$items;
+  my @lines = ("Intellite: the instructions the user's organization and the user keep on Intellite for all their work with AI tools, given at the start of every session. They apply to everything in this session, not only to the work they name. Where the user's own differ from the organization's, the organization's apply.");
+  my ($used, @left) = (0);
+  for my $item (@$items) {
+    my $text = $item->{text} // '';
+    if ($used + length($text) > $INSTRUCTION_BUDGET) { push @left, "$item->{title} (version $item->{version})"; next; }
+    $used += length $text;
+    my $from = $item->{organization} ? 'From the organization' : "The user's own";
+    push @lines, '', "## $from: $item->{title} (version $item->{version})", $text;
+  }
+  push @lines, '', 'Not given here, as the instructions above already fill what a session is given at its start: ' . join(', ', @left) . '. Read them on Intellite when the work needs them.' if @left;
+  return join("\n", @lines);
+}
+
 # --- what is kept: the record of each AI tool's skills ------------------------------------------------------------------
 
 sub state_path { my ($tool) = @_; return File::Spec->catfile($ROOT, "state-$tool.json"); }
@@ -323,16 +413,17 @@ sub description_of {
   return defined $value ? $value : '';
 }
 
-sub connect_command {
+sub program_command {
   my $here = (File::Spec->splitpath(File::Spec->rel2abs(__FILE__)))[1];
   $here =~ s{/+$}{};
-  return "\"$here/intellite-sync\" connect";
+  return "\"$here/intellite-sync\"";
 }
+sub connect_command { return program_command() . ' connect'; }
 
 # --- one sync of one AI tool's skills -------------------------------------------------------------------------------------
 
 sub sync_tool {
-  my ($tool) = @_;
+  my ($tool, $session_folder) = @_;
   my $skills_folder = skills_folder($tool);
   ensure_dir($skills_folder);
   my $state = load_state($tool);
@@ -359,6 +450,7 @@ sub sync_tool {
       next;
     }
     my $list = decode_json_text($answer->{body}) // {};
+    save_instructions($connection->{id}, $list->{instructions});
     my %wanted;
     for my $skill (@{ $list->{skills} // [] }) {
       $skill->{connection} = $connection->{id};
@@ -380,6 +472,8 @@ sub sync_tool {
     }
     # Taken out: what the list says to take out, and what this connection brought that the list no longer gives.
     my %reasons = map { ($_->{name} => $_->{reason}) } @{ $list->{remove} // [] };
+    # A post whose version chosen is an instruction now leaves the skills: it is given at the start of each session.
+    $reasons{ $_->{name} } = 'instruction' for @{ $list->{instructions} // [] };
     for my $name (sort keys %{ $state->{skills} }) {
       my $kept = $state->{skills}{$name};
       next if ($kept->{connection} // '') ne $connection->{id} || $wanted{$name};
@@ -400,10 +494,18 @@ sub sync_tool {
   }
 
   # Versions stopped as harmful are taken out even without a connection: the list is public and names digests only.
-  if (%{ $state->{skills} }) {
+  my $instructions_kept = grep { @{ instructions_of($_->{id}) } } @$connections;
+  if (%{ $state->{skills} } || $instructions_kept) {
     my $stopped = http('GET', "$RESOURCE/skills/stopped", etag => ($state->{notices}{stoppedETag} // ''));
     if ($stopped->{status} == 200) {
       my %harmful = map { ($_ => 1) } @{ (decode_json_text($stopped->{body}) // {})->{harmful} // [] };
+      for my $connection (@$connections) {
+        my $items = instructions_of($connection->{id});
+        my @keep = grep { !($_->{digest} && $harmful{ $_->{digest} }) } @$items;
+        next if @keep == @$items;
+        push @changes, map { { kind => 'removed', name => $_->{name}, reason => 'harmful', title => $_->{title}, instruction => 1 } } grep { $_->{digest} && $harmful{ $_->{digest} } } @$items;
+        write_json(instructions_path($connection->{id}), \@keep);
+      }
       for my $name (sort keys %{ $state->{skills} }) {
         my $kept = $state->{skills}{$name};
         next unless $kept->{digest} && $harmful{$kept->{digest}};
@@ -425,6 +527,7 @@ sub sync_tool {
   }
 
   save_connections($connections);
+  my $instructions = instruction_text(session_instructions($session_folder, \@notes));
   my @told;
   for my $note (@notes) {
     my $last = $state->{notices}{ $note->{key} };
@@ -433,7 +536,7 @@ sub sync_tool {
     push @told, $note->{text};
   }
   write_json(state_path($tool), $state);
-  return { changes => \@changes, notes => \@told };
+  return { changes => \@changes, notes => \@told, instructions => $instructions };
 }
 
 sub hours_since {
@@ -447,15 +550,18 @@ sub hours_since {
 sub hook_text {
   my ($tool, $result) = @_;
   my @lines;
-  if (@{ $result->{changes} }) {
+  push @lines, $result->{instructions}, '' if length($result->{instructions} // '');
+  my @skill_changes = grep { !$_->{instruction} } @{ $result->{changes} };
+  push @lines, "Intellite stopped the instruction $_->{name} ($_->{title}) as harmful: do not follow it, even from earlier in this conversation." for grep { $_->{instruction} } @{ $result->{changes} };
+  if (@skill_changes) {
     push @lines, $tool eq 'claude'
       ? "Intellite updated this computer's skills from the user's Stack at the start of this session; your skill list has them now:"
       : "Intellite updated this computer's skills from the user's Stack at the start of this session. New and updated ones join your skill list from the next session; in this session, use each like a skill when its description fits the task: read its SKILL.md first and follow it.";
-    for my $change (@{ $result->{changes} }) {
+    for my $change (@skill_changes) {
       my $from = $change->{organization} ? ", from the organization's Stack" : '';
       if ($change->{kind} eq 'removed') {
         my %why = (harmful => 'stopped on Intellite as harmful: do not use it, even from earlier in this conversation', withdrawn => "taken out of the organization's Stack",
-          suspended => 'stopped on Intellite', unavailable => 'no longer readable by the user');
+          suspended => 'stopped on Intellite', unavailable => 'no longer readable by the user', instruction => 'it is an instruction now, given at the start of each session');
         push @lines, "- removed $change->{name} ($change->{title}): " . ($why{ $change->{reason} } // 'taken out of the Stack') . '.';
       } else {
         my $line = "- $change->{kind} $change->{name} (version $change->{version}$from): $change->{title}";
@@ -519,7 +625,7 @@ sub connect_workspace {
   die "Connected, but the Stack could not be read (HTTP $list->{status}).\n" unless $list->{status} == 200;
   my $workspace = (decode_json_text($list->{body}) // {})->{workspace} // {};
   my $label = ($workspace->{kind} // '') eq 'organization' ? "the organization's Stack ($workspace->{id})" : "the user's own Stack";
-  my (@kept, $replaced);
+  my (@kept, $replaced, @folders);
   # One connection a workspace: connecting it again replaces the earlier one, whose refresh token is revoked.
   for my $connection (@{ connections() }) {
     my $same = $connection->{workspace} && ($connection->{workspace}{kind} // '') eq ($workspace->{kind} // '') && ($connection->{workspace}{id} // '') eq ($workspace->{id} // '');
@@ -527,12 +633,15 @@ sub connect_workspace {
       my $old = refresh_token($connection);
       http('POST', "$ISSUER/oauth/revoke", form => { token => $old, token_type_hint => 'refresh_token', client_id => $CLIENT_ID }) if $old;
       remove_refresh_token($connection);
+      unlink instructions_path($connection->{id});
       $replaced = $connection->{id};
+      # The folders assigned to the workspace stay with it.
+      @folders = grep { length($_ // '') } @{ $connection->{folders} // [] };
       next;
     }
     push @kept, $connection;
   }
-  my $connection = { id => unpack('H*', random_bytes(8)), workspace => $workspace, label => $label, connectedAt => now_iso(), ended => undef };
+  my $connection = { id => unpack('H*', random_bytes(8)), workspace => $workspace, label => $label, connectedAt => now_iso(), ended => undef, folders => \@folders };
   save_refresh_token($connection, $token->{refresh_token});
   push @kept, $connection;
   save_connections(\@kept);
@@ -559,6 +668,7 @@ sub disconnect_workspace {
     my $refresh = refresh_token($connection);
     http('POST', "$ISSUER/oauth/revoke", form => { token => $refresh, token_type_hint => 'refresh_token', client_id => $CLIENT_ID }) if $refresh;
     remove_refresh_token($connection);
+    unlink instructions_path($connection->{id});
     for my $tool (qw(claude codex)) {
       next unless -f state_path($tool);
       my $tool_state = load_state($tool);
@@ -579,6 +689,22 @@ sub disconnect_workspace {
   print "Disconnected $id: its skills were taken out (a skill changed on this computer was left in place).\n";
 }
 
+sub set_folder {
+  my ($id, $place, $assign) = @_;
+  die "Name the folder: assign <id> <folder>.\n" unless length($place // '');
+  my $full = File::Spec->rel2abs($place);
+  $full =~ s{/+$}{};
+  my $list = connections();
+  my ($connection) = grep { ($_->{id} // '') eq $id } @$list;
+  die "No connection $id. Run status to see the connections.\n" unless $connection;
+  die "$id is the user's own workspace: its instructions are given in every folder.\n" unless $connection->{workspace} && ($connection->{workspace}{kind} // '') eq 'organization';
+  my @folders = grep { length($_ // '') && $_ ne $full } @{ $connection->{folders} // [] };
+  push @folders, $full if $assign;
+  $connection->{folders} = \@folders;
+  save_connections($list);
+  print $assign ? "The instructions of $connection->{label} are given in $full and the folders in it.\n" : "The instructions of $connection->{label} are no longer given in $full.\n";
+}
+
 sub show_status {
   print "Intellite: $ISSUER\n";
   my $list = connections();
@@ -586,6 +712,8 @@ sub show_status {
   for my $connection (@$list) {
     my $condition = $connection->{ended} ? 'ended (connect again to resume updates)' : 'connected';
     printf "- %s: %s, %s, last synced %s\n", $connection->{id}, $connection->{label}, $condition, $connection->{syncedAt} // '-';
+    print "  folder: $_\n" for grep { length($_ // '') } @{ $connection->{folders} // [] };
+    printf "  instruction: %s version %s (%d characters)\n", $_->{name}, $_->{version}, length($_->{text} // '') for @{ instructions_of($connection->{id}) };
   }
   for my $tool (qw(claude codex)) {
     next unless -f state_path($tool);
@@ -609,9 +737,12 @@ sub enter_lock {
 if ($command eq 'hook') {
   # A hook never stops the session: whatever goes wrong, the session starts with the skills as they are.
   my $output = eval {
-    my $lock = enter_lock(4) or return '';
-    my $result = sync_tool($argument);
-    close $lock;
+    my $folder = session_folder();
+    my $lock = enter_lock(4);
+    my $result;
+    if ($lock) { $result = sync_tool($argument, $folder); close $lock; }
+    # Another session is syncing: this one is given the instructions last received, and nothing else.
+    else { $result = { changes => [], notes => [], instructions => instruction_text(session_instructions($folder, [])) }; }
     my $text = hook_text($argument, $result);
     return '' unless length $text;
     my %said = (hookEventName => 'SessionStart', additionalContext => $text);
@@ -629,7 +760,10 @@ if ($command eq 'hook') {
   disconnect_workspace($argument);
 } elsif ($command eq 'status') {
   show_status();
+} elsif ($command eq 'assign' || $command eq 'unassign') {
+  my $lock = enter_lock(30);
+  set_folder($argument, $rest[0], $command eq 'assign');
 } else {
-  print "Usage: intellite-sync hook claude|codex | connect | status | disconnect <id>\n";
+  print "Usage: intellite-sync hook claude|codex | connect | status | disconnect <id> | assign <id> <folder> | unassign <id> <folder>\n";
   exit 2;
 }

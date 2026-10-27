@@ -1,11 +1,14 @@
 # Intellite sync for Windows (Windows PowerShell 5.1 or later).
 #   intellite-sync hook claude|codex     SessionStart hook: sync the Stack into the skills folder, print the hook output
+#                                        (instructions: given in full; hook input on stdin, cwd)
 #   intellite-sync connect               OAuth 2.0 authorization code, PKCE, loopback redirect; scope methods.stack.read
 #   intellite-sync status
 #   intellite-sync disconnect <id>       revoke the connection, remove its skills
+#   intellite-sync assign <id> <folder>  give an organization's instructions in <folder> (two organizations or more)
+#   intellite-sync unassign <id> <folder>
 # Refresh tokens: DPAPI (CurrentUser); never printed, logged or passed on a command line.
 # ASCII only: Windows PowerShell 5.1 reads a script without a byte order mark in the ANSI code page.
-param([Parameter(Position = 0)][string]$Command = "status", [Parameter(Position = 1)][string]$Argument = "", [switch]$NoBrowser)
+param([Parameter(Position = 0)][string]$Command = "status", [Parameter(Position = 1)][string]$Argument = "", [Parameter(Position = 2)][string]$Folder = "", [switch]$NoBrowser)
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 Add-Type -AssemblyName System.Net.Http
@@ -17,6 +20,9 @@ $Utf8 = New-Object System.Text.UTF8Encoding $false
 $Started = [DateTime]::UtcNow
 # A session waits for its start hooks: past this, the session starts with the skills as they are.
 $BudgetSeconds = 10
+# The characters of the instructions given at the start of a session: Claude Code takes up to 10,000 from a hook, and
+# what changed and the notes need room too.
+$InstructionBudget = 8000
 
 function Get-Issuer {
   $value = $env:INTELLITE_SYNC_ISSUER
@@ -173,6 +179,88 @@ function Get-AccessToken($Connection) {
   return ""
 }
 
+# --- the instructions each connection gave ------------------------------------------------------------------------------
+
+function Get-InstructionsPath([string]$Id) { return Join-Path $Root "instructions-$Id.json" }
+function Get-Instructions([string]$Id) { $value = Read-Json (Get-InstructionsPath $Id) $null; if ($null -eq $value) { return @() }; return @($value) }
+# Keeps what the list gave, each checked against its SHA-256: a text that does not match is not kept.
+function Save-Instructions([string]$Id, $List) {
+  $kept = New-Object System.Collections.ArrayList
+  foreach ($item in @($List)) {
+    if (-not $item) { continue }
+    if ((Get-Sha256 $Utf8.GetBytes([string]$item.text)) -ne [string]$item.sha256) { Write-Log "instruction $($item.name) $($item.version): the text does not match its SHA-256"; continue }
+    [void]$kept.Add([pscustomobject]@{ name = [string]$item.name; methodId = [string]$item.methodId; version = [int]$item.version; title = [string]$item.title;
+      organization = [bool]$item.organization; digest = [string]$item.digest; text = [string]$item.text })
+  }
+  Write-Json (Get-InstructionsPath $Id) @($kept)
+}
+
+# The folder the session works in, from the hook's input on stdin (Claude Code and Codex send its cwd). Read for at most
+# a second and a half, so that a hook started without input does not wait.
+function Get-SessionFolder {
+  try {
+    if (-not [Console]::IsInputRedirected) { return "" }
+    $reading = [Console]::In.ReadToEndAsync()
+    if (-not $reading.Wait(1500)) { return "" }
+    return [string](Get-Field ($reading.Result | ConvertFrom-Json) "cwd")
+  } catch { return "" }
+}
+function Test-Within([string]$Place, [string]$Parent) {
+  if (-not $Place -or -not $Parent) { return $false }
+  $placePath = [System.IO.Path]::GetFullPath($Place).TrimEnd("\") + "\"
+  $parentPath = [System.IO.Path]::GetFullPath($Parent).TrimEnd("\") + "\"
+  return $placePath.StartsWith($parentPath, [StringComparison]::OrdinalIgnoreCase)
+}
+
+# The instructions for a session in that folder: an organization's first, then the user's own. An organization's are
+# given everywhere while it is the only organization connected and no folder is assigned to it; otherwise only in the
+# folders assigned to it, so that one organization's instructions never reach another's work.
+function Get-SessionInstructions([string]$SessionFolder, $Notes) {
+  $connections = @(Get-Connections)
+  $organizations = @($connections | Where-Object { $_.workspace -and $_.workspace.kind -eq "organization" })
+  $own = @($connections | Where-Object { -not ($_.workspace -and $_.workspace.kind -eq "organization") })
+  $given = New-Object System.Collections.ArrayList
+  $withheld = New-Object System.Collections.ArrayList
+  foreach ($connection in ($organizations + $own)) {
+    $items = @(Get-Instructions $connection.id)
+    if ($items.Count -eq 0) { continue }
+    if ($connection.workspace -and $connection.workspace.kind -eq "organization") {
+      $folders = @(@(Get-Field $connection "folders") | Where-Object { $_ })
+      $applies = $false
+      if ($folders.Count -gt 0) { foreach ($place in $folders) { if (Test-Within $SessionFolder $place) { $applies = $true } } }
+      elseif ($organizations.Count -eq 1) { $applies = $true }
+      else { [void]$withheld.Add($connection) }
+      if (-not $applies) { continue }
+    }
+    foreach ($item in $items) { [void]$given.Add($item) }
+  }
+  if ($withheld.Count -gt 0) {
+    $ids = ($withheld | ForEach-Object { "$($_.id) ($($_.label))" }) -join ", "
+    [void]$Notes.Add(@{ key = "unassigned"; daily = $true; text = "Intellite: the instructions of $ids are not given in this session, because more than one organization is connected and this folder is not assigned to one of them. When the user works for one of them here, with their consent, run: $(Get-ProgramCommand) assign <id> `"<folder>`"" })
+  }
+  return ,$given
+}
+
+function Get-InstructionText($Items) {
+  if ($Items.Count -eq 0) { return "" }
+  $lines = New-Object System.Collections.ArrayList
+  [void]$lines.Add("Intellite: the instructions the user's organization and the user keep on Intellite for all their work with AI tools, given at the start of every session. They apply to everything in this session, not only to the work they name. Where the user's own differ from the organization's, the organization's apply.")
+  $used = 0
+  $left = New-Object System.Collections.ArrayList
+  foreach ($item in $Items) {
+    $text = [string]$item.text
+    if ($used + $text.Length -gt $InstructionBudget) { [void]$left.Add("$($item.title) (version $($item.version))"); continue }
+    $used += $text.Length
+    $from = "The user's own"
+    if ($item.organization) { $from = "From the organization" }
+    [void]$lines.Add("")
+    [void]$lines.Add("## $($from): $($item.title) (version $($item.version))")
+    [void]$lines.Add($text)
+  }
+  if ($left.Count -gt 0) { [void]$lines.Add(""); [void]$lines.Add("Not given here, as the instructions above already fill what a session is given at its start: $($left -join ', '). Read them on Intellite when the work needs them.") }
+  return ($lines -join "`n")
+}
+
 # --- what is kept: the record of each AI tool's skills ------------------------------------------------------------------
 
 function Get-State([string]$Tool) {
@@ -268,7 +356,7 @@ function Get-Description([string]$SkillFolder) {
 
 # --- one sync of one AI tool's skills -------------------------------------------------------------------------------------
 
-function Sync-Tool([string]$Tool) {
+function Sync-Tool([string]$Tool, [string]$SessionFolder) {
   $skillsFolder = Get-SkillsFolder $Tool
   New-Item -ItemType Directory -Force $skillsFolder | Out-Null
   $state = Get-State $Tool
@@ -296,6 +384,7 @@ function Sync-Tool([string]$Tool) {
       continue
     }
     $list = $answer.Body | ConvertFrom-Json
+    Save-Instructions $connection.id (Get-Field $list "instructions")
     $wanted = @{}
     foreach ($skill in @($list.skills)) {
       if (-not $skill) { continue }
@@ -316,6 +405,8 @@ function Sync-Tool([string]$Tool) {
     # Taken out: what the list says to take out, and what this connection brought that the list no longer gives.
     $reasons = @{}
     foreach ($removal in @($list.remove)) { if ($removal) { $reasons[[string]$removal.name] = [string]$removal.reason } }
+    # A post whose version chosen is an instruction now leaves the skills: it is given at the start of each session.
+    foreach ($item in @(Get-Field $list "instructions")) { if ($item) { $reasons[[string]$item.name] = "instruction" } }
     foreach ($property in @($state.skills.PSObject.Properties)) {
       $kept = $property.Value
       if ($kept.connection -ne $connection.id -or $wanted.ContainsKey($property.Name)) { continue }
@@ -337,10 +428,20 @@ function Sync-Tool([string]$Tool) {
   }
 
   # Versions stopped as harmful are taken out even without a connection: the list is public and names digests only.
-  if (@($state.skills.PSObject.Properties).Count -gt 0) {
+  $instructionsKept = @($connections | Where-Object { @(Get-Instructions $_.id).Count -gt 0 }).Count -gt 0
+  if (@($state.skills.PSObject.Properties).Count -gt 0 -or $instructionsKept) {
     $stopped = Invoke-Http "GET" "$Resource/skills/stopped" "" $null ([string](Get-Field $state.notices "stoppedETag"))
     if ($stopped.Status -eq 200) {
       $digests = @(($stopped.Body | ConvertFrom-Json).harmful)
+      foreach ($connection in $connections) {
+        $items = @(Get-Instructions $connection.id)
+        $keep = @($items | Where-Object { -not ($_.digest -and $digests -contains [string]$_.digest) })
+        if ($keep.Count -eq $items.Count) { continue }
+        foreach ($item in $items) {
+          if ($item.digest -and $digests -contains [string]$item.digest) { [void]$changes.Add(@{ kind = "removed"; name = [string]$item.name; reason = "harmful"; title = [string]$item.title; instruction = $true }) }
+        }
+        Write-Json (Get-InstructionsPath $connection.id) @($keep)
+      }
       foreach ($property in @($state.skills.PSObject.Properties)) {
         if ($property.Value.digest -and $digests -contains [string]$property.Value.digest) {
           Remove-SkillFolder (Join-Path $skillsFolder $property.Name) $true
@@ -361,6 +462,7 @@ function Sync-Tool([string]$Tool) {
   }
 
   Save-Connections $connections
+  $instructions = Get-InstructionText (Get-SessionInstructions $SessionFolder $notes)
   $told = New-Object System.Collections.ArrayList
   foreach ($note in $notes) {
     $last = Get-Field $state.notices $note.key
@@ -369,7 +471,7 @@ function Sync-Tool([string]$Tool) {
     [void]$told.Add($note.text)
   }
   Write-Json (Join-Path $Root "state-$Tool.json") $state
-  return @{ changes = $changes; notes = $told }
+  return @{ changes = $changes; notes = $told; instructions = $instructions }
 }
 
 function Get-ConnectCommand {
@@ -377,12 +479,20 @@ function Get-ConnectCommand {
   return "& `"$(Join-Path $here 'intellite-sync.cmd')`" connect (PowerShell), or `"$((Join-Path $here 'intellite-sync').Replace('\', '/'))`" connect (bash)"
 }
 
+function Get-ProgramCommand {
+  $here = Split-Path -Parent $PSCommandPath
+  return "& `"$(Join-Path $here 'intellite-sync.cmd')`""
+}
+
 function Get-HookText([string]$Tool, $Result) {
   $lines = New-Object System.Collections.ArrayList
-  if ($Result.changes.Count -gt 0) {
+  if ($Result.instructions) { [void]$lines.Add($Result.instructions); [void]$lines.Add("") }
+  $skillChanges = @($Result.changes | Where-Object { -not $_.instruction })
+  foreach ($change in @($Result.changes | Where-Object { $_.instruction })) { [void]$lines.Add("Intellite stopped the instruction $($change.name) ($($change.title)) as harmful: do not follow it, even from earlier in this conversation.") }
+  if ($skillChanges.Count -gt 0) {
     if ($Tool -eq "claude") { [void]$lines.Add("Intellite updated this computer's skills from the user's Stack at the start of this session; your skill list has them now:") }
     else { [void]$lines.Add("Intellite updated this computer's skills from the user's Stack at the start of this session. New and updated ones join your skill list from the next session; in this session, use each like a skill when its description fits the task: read its SKILL.md first and follow it.") }
-    foreach ($change in $Result.changes) {
+    foreach ($change in $skillChanges) {
       $from = ""
       if ($change.organization) { $from = ", from the organization's Stack" }
       if ($change.kind -eq "removed") {
@@ -391,6 +501,7 @@ function Get-HookText([string]$Tool, $Result) {
         elseif ($change.reason -eq "withdrawn") { $why = "taken out of the organization's Stack" }
         elseif ($change.reason -eq "suspended") { $why = "stopped on Intellite" }
         elseif ($change.reason -eq "unavailable") { $why = "no longer readable by the user" }
+        elseif ($change.reason -eq "instruction") { $why = "it is an instruction now, given at the start of each session" }
         [void]$lines.Add("- removed $($change.name) ($($change.title)): $why.")
       } else {
         $line = "- $($change.kind) $($change.name) (version $($change.version)$from): $($change.title)"
@@ -467,15 +578,18 @@ function Connect-Workspace {
       $old = Get-RefreshToken $connection.id
       if ($old) { [void](Invoke-Http "POST" "$Issuer/oauth/revoke" "" @{ token = $old; token_type_hint = "refresh_token"; client_id = $ClientId }) }
       Remove-RefreshToken $connection.id
+      Remove-Item -LiteralPath (Get-InstructionsPath $connection.id) -Force -ErrorAction SilentlyContinue
       $connection | Add-Member -NotePropertyName replacedBy -NotePropertyValue "" -Force
       $script:Replaced = $connection.id
+      # The folders assigned to the workspace stay with it.
+      $script:ReplacedFolders = @(@(Get-Field $connection "folders") | Where-Object { $_ })
       continue
     }
     [void]$connections.Add($connection)
   }
   $id = Get-Hex (Get-RandomBytes 8)
   Save-RefreshToken $id ([string]$token.refresh_token)
-  [void]$connections.Add([pscustomobject]@{ id = $id; workspace = $workspace; label = $label; connectedAt = [DateTime]::UtcNow.ToString("o"); ended = $null })
+  [void]$connections.Add([pscustomobject]@{ id = $id; workspace = $workspace; label = $label; connectedAt = [DateTime]::UtcNow.ToString("o"); ended = $null; folders = @($script:ReplacedFolders | Where-Object { $_ }) })
   Save-Connections $connections
   # Skills an earlier connection of the same workspace brought now belong to this one.
   if ($script:Replaced) {
@@ -501,6 +615,7 @@ function Disconnect-Workspace([string]$Id) {
     $BudgetSeconds = 30
     if ($refresh) { [void](Invoke-Http "POST" "$Issuer/oauth/revoke" "" @{ token = $refresh; token_type_hint = "refresh_token"; client_id = $ClientId }) }
     Remove-RefreshToken $connection.id
+    Remove-Item -LiteralPath (Get-InstructionsPath $connection.id) -Force -ErrorAction SilentlyContinue
     foreach ($tool in @("claude", "codex")) {
       $path = Join-Path $Root "state-$tool.json"
       if (-not (Test-Path -LiteralPath $path)) { continue }
@@ -520,6 +635,21 @@ function Disconnect-Workspace([string]$Id) {
   Write-Output "Disconnected $($Id): its skills were taken out (a skill changed on this computer was left in place)."
 }
 
+function Set-Folder([string]$Id, [string]$Place, [bool]$Assign) {
+  if (-not $Place) { throw "Name the folder: assign <id> <folder>." }
+  $full = [System.IO.Path]::GetFullPath($Place).TrimEnd("\")
+  $connections = @(Get-Connections)
+  $connection = $connections | Where-Object { $_.id -eq $Id } | Select-Object -First 1
+  if (-not $connection) { throw "No connection $Id. Run status to see the connections." }
+  if (-not ($connection.workspace -and $connection.workspace.kind -eq "organization")) { throw "$Id is the user's own workspace: its instructions are given in every folder." }
+  $folders = @(@(Get-Field $connection "folders") | Where-Object { $_ -and $_ -ne $full })
+  if ($Assign) { $folders += $full }
+  $connection | Add-Member -NotePropertyName folders -NotePropertyValue @($folders) -Force
+  Save-Connections $connections
+  if ($Assign) { Write-Output "The instructions of $($connection.label) are given in $full and the folders in it." }
+  else { Write-Output "The instructions of $($connection.label) are no longer given in $full." }
+}
+
 function Show-Status {
   Write-Output "Intellite: $Issuer"
   $connections = @(Get-Connections)
@@ -528,6 +658,8 @@ function Show-Status {
     $condition = "connected"
     if ($connection.ended) { $condition = "ended (connect again to resume updates)" }
     Write-Output "- $($connection.id): $($connection.label), $condition, last synced $($connection.syncedAt)"
+    foreach ($place in @(Get-Field $connection "folders")) { if ($place) { Write-Output "  folder: $place" } }
+    foreach ($item in @(Get-Instructions $connection.id)) { Write-Output "  instruction: $($item.name) version $($item.version) ($(([string]$item.text).Length) characters)" }
   }
   foreach ($tool in @("claude", "codex")) {
     $path = Join-Path $Root "state-$tool.json"
@@ -553,9 +685,11 @@ switch ($Command) {
   "hook" {
     # A hook never stops the session: whatever goes wrong, the session starts with the skills as they are.
     try {
+      $sessionFolder = Get-SessionFolder
       $lock = Enter-Lock 4
-      if (-not $lock) { exit 0 }
-      try { $result = Sync-Tool $Argument } finally { $lock.Dispose() }
+      if ($lock) { try { $result = Sync-Tool $Argument $sessionFolder } finally { $lock.Dispose() } }
+      # Another session is syncing: this one is given the instructions last received, and nothing else.
+      else { $result = @{ changes = @(); notes = @(); instructions = Get-InstructionText (Get-SessionInstructions $sessionFolder (New-Object System.Collections.ArrayList)) } }
       $text = Get-HookText $Argument $result
       if (-not $text) { exit 0 }
       $output = @{ hookEventName = "SessionStart"; additionalContext = $text }
@@ -566,5 +700,7 @@ switch ($Command) {
   "connect" { $lock = Enter-Lock 30; try { Connect-Workspace } finally { if ($lock) { $lock.Dispose() } } }
   "disconnect" { $lock = Enter-Lock 30; try { Disconnect-Workspace $Argument } finally { if ($lock) { $lock.Dispose() } } }
   "status" { Show-Status }
-  default { Write-Output "Usage: intellite-sync hook claude|codex | connect | status | disconnect <id>"; exit 2 }
+  "assign" { $lock = Enter-Lock 30; try { Set-Folder $Argument $Folder $true } finally { if ($lock) { $lock.Dispose() } } }
+  "unassign" { $lock = Enter-Lock 30; try { Set-Folder $Argument $Folder $false } finally { if ($lock) { $lock.Dispose() } } }
+  default { Write-Output "Usage: intellite-sync hook claude|codex | connect | status | disconnect <id> | assign <id> <folder> | unassign <id> <folder>"; exit 2 }
 }

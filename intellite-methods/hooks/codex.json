@@ -1,15 +1,16 @@
 {
-  "description": "Intellite Stack sync (SessionStart).",
+  "description": "Intellite Stack sync and instructions (SessionStart).",
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume",
+        "matcher": "startup|resume|clear|compact",
         "hooks": [
           {
             "type": "command",
             "command": "cd \"$PLUGIN_ROOT/sync\" && ./intellite-sync hook codex",
             "commandWindows": "cd \"$env:PLUGIN_ROOT/sync\"; ./intellite-sync hook codex",
             "timeout": 20,
+            "additionalContextLimit": 12000,
             "statusMessage": "Intellite sync"
           }
         ]

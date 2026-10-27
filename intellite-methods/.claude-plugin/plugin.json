@@ -1,7 +1,7 @@
 {
   "name": "intellite-methods",
-  "description": "Intellite MCP server, skill and Stack sync.",
-  "version": "0.4.2",
+  "description": "Intellite MCP server, skill, Stack sync and instructions.",
+  "version": "0.5.0",
   "author": {
     "name": "Intellite"
   },

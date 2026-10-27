@@ -1,7 +1,7 @@
 {
   "name": "intellite-methods",
-  "version": "0.4.2",
-  "description": "Intellite MCP server, skill and Stack sync.",
+  "version": "0.5.0",
+  "description": "Intellite MCP server, skill, Stack sync and instructions.",
   "author": {
     "name": "Intellite"
   },
@@ -18,7 +18,7 @@
   "hooks": "./hooks/codex.json",
   "interface": {
     "displayName": "Intellite",
-    "shortDescription": "Intellite MCP server, skill and Stack sync.",
+    "shortDescription": "Intellite MCP server, skill, Stack sync and instructions.",
     "developerName": "Intellite",
     "category": "Productivity",
     "websiteURL": "https://intellite.app/",

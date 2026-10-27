@@ -33,16 +33,20 @@ Codex runs plugin hooks after they are trusted: `/hooks` (CLI) or Settings > Hoo
 sync/intellite-sync connect
 sync/intellite-sync status
 sync/intellite-sync disconnect <id>
+sync/intellite-sync assign <id> <folder>
 ```
 
 Windows: `sync\intellite-sync.cmd`.
 
-- Runs on SessionStart (startup, resume). Time limit 10 seconds.
+- Runs on SessionStart (startup, resume, clear, compact). Time limit 10 seconds.
 - Connection: OAuth 2.0 authorization code with PKCE, loopback redirect, scope `methods.stack.read`. One connection per
   workspace. Expires after 30 days unused (personal workspace) or by the organization's sign-in rules.
 - Writes only `intellite-*` folders in `~/.claude/skills` (`$CLAUDE_CONFIG_DIR/skills`) and `~/.agents/skills`.
 - Checks the SHA-256 of every file. Leaves a folder that was changed locally.
 - Removes skills taken out of the Stack, and versions listed at `/apps/intellite-methods/skills/stopped`.
+- Instructions (posts of kind `instruction`): text given in the hook output on every SessionStart, the organization's
+  first, 8,000 characters at most. With two organizations or more connected, an organization's are given only in the
+  folders assigned to it.
 - Refresh token: DPAPI (Windows), Keychain (macOS), Secret Service or a 0600 file (Linux). Records: `~/.intellite/sync/`.
 - Requires PowerShell 5.1 (Windows), or Perl and curl (macOS, Linux).
 

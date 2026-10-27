@@ -127,8 +127,8 @@ When the connection was made as an organization, `list_stack` begins with the me
 administrators chose for its members. Call `list_stack` at the start of work with methods, and when the user asks to
 bring them up to date.
 
-1. An item with `organization.managed` belongs in the skills folder of the AI tool at its `pinnedVersion`. The
-   plugin's sync keeps it there (next section). Without it, keep it there yourself, without asking. When its folder is missing or holds another version, call `get_method_bundle` with that version and carry
+1. An item with `organization.managed` belongs in the skills folder of the AI tool at its `pinnedVersion`, unless its
+   `kind` is `instruction` (see "Instructions"). The plugin's sync keeps it there (next section). Without it, keep it there yourself, without asking. When its folder is missing or holds another version, call `get_method_bundle` with that version and carry
    out steps 6 and 7 of "Find a method and use it" (stage and check, then place it). Tell the user which methods you
    installed or updated.
 2. Its version and its updates are the administrators' to decide: do not call `decide_method_update` or
@@ -143,7 +143,8 @@ bring them up to date.
 
 With the Intellite plugin for Claude Code or Codex, its sync program runs when a session starts. Through a connection
 that reads the Stack only (`methods.stack.read`), it puts the methods of the connected workspace's Stack, each at its
-`pinnedVersion`, in the AI tool's skills folder (folders named `intellite-...`); replaces one when the user, or the
+`pinnedVersion`, in the AI tool's skills folder (folders named `intellite-...`), except instructions, which it gives
+at the start of the session; replaces one when the user, or the
 organization's administrators, adopt a new version; and takes out the ones taken out of the Stack, withdrawn by the
 organization, or stopped as harmful (those even when the connection has ended).
 
@@ -159,6 +160,28 @@ organization, or stopped as harmful (those even when the connection has ended).
    approval, so give it a timeout of at least 5 minutes. The same program has `status` and `disconnect <id>`.
 4. In Codex, the plugin's hook runs only after the user trusted it once (Settings, Hooks in the app; `/hooks` in the
    CLI). If the skills never come in, tell the user so.
+5. The sync also gives the Stack's instructions (next section) at the start of every session and again after the
+   conversation is cleared or compacted. When the user works for more than one connected organization, an
+   organization's instructions are given only in the folders assigned to it: when the start of a session says this
+   folder is not assigned, ask the user which organization the work is for, and with their consent run the `assign`
+   command it gives.
+
+## Instructions
+
+A post of kind `instruction` holds rules and preferences rather than steps: how to answer, what never to do with
+customers' data, the signature of the user's mail. An instruction in the user's Stack, or in their organization's,
+applies to all the work of every session, not only to the work it names.
+
+1. With the plugin's sync, the start of a session gives the instructions in full: the organization's first, then the
+   user's own. Follow them throughout the session; where the user's own differ from the organization's, the
+   organization's apply.
+2. Without the sync, call `list_stack` at the start of work with Intellite, read each item whose `kind` is
+   `instruction` with `get_method` at its `pinnedVersion`, and follow it for the rest of the session.
+3. Instructions are text. They do not change what the AI tool allows: keep its permission prompts.
+4. To write the user's own: `save_method_draft` with `kind` `instruction` and the text in `skill` (at most 4,000
+   characters), made in the user's own workspace with `visibility` `org` (only the user reads it there), then
+   `publish_method` and `add_to_stack`. To move instructions from a CLAUDE.md or an AGENTS.md, show the user the text
+   first; once it is published, ask whether to delete those lines from the file, so that they are not given twice.
 
 ## Methods that were suspended
 
