@@ -23,15 +23,15 @@ reads the same text; that is no reason to answer in English.
 
 
 All operations are tools of the `intellite-methods` server. The signed-in Intellite account is the acting user for
-every call; no argument names a user. `get_intellite_skill` returns Intellite's own skill, which has these steps and
-the use of Intellite's business apps; an AI tool without this plugin keeps that skill instead.
+every call; no argument names a user. Follow this skill for methods. `get_intellite_skill` returns Intellite's own
+skill, the one AI tools without this plugin keep; with this plugin, read it only to use Intellite's business apps.
 
 ## Find a method and use it
 
 1. Call `search_methods` with what the user wants to be able to do, in the user's words. When many methods come back,
    narrow them with `tool`, taking a name from `facets` (the tools of the methods found, with how many use each).
 2. Show the user the candidates with their author, tools, costs and the environments the author did and did not
-   confirm. Let the user choose.
+   confirm, each with its `page`, where the user sees what it makes. Let the user choose.
 3. Ask the user which of the two they want, unless they already said:
    - **Use it for this task only.** Nothing is installed in the AI tool and nothing is recorded on Intellite.
    - **Keep it.** The method goes into the user's Stack on Intellite, pinned to one version, and into the skills
@@ -142,14 +142,19 @@ person's environment with their own materials: that is what Intellite is for.
 4. Leave out secrets, tokens, passwords and paths of the user's own computer, from the text and from attachments.
    Publication refuses the shapes it recognizes; it does not examine attachments that are not text, so check
    those yourself.
-5. Call `save_method_draft` with `base_version` 0 for a new method, then `put_method_attachment` for each file in
-   `required_attachments`.
-6. Call `get_method_draft`, show the user what will be published and who will read it (`visibility`), and get their
+5. Call `save_method_draft` with `base_version` 0 for a new method, then send each file in `required_attachments`:
+   call `start_attachment_upload` with its name and size, and run the command it returns with the file's path in
+   place of FILE (`commands.sh` in bash or zsh, `commands.powershell` in PowerShell). `put_method_attachment`
+   takes content written out in the call, a few kilobytes at most.
+6. Call `get_method_draft`, show the user what will be published and who will read it (`visibility`), give them
+   the draft's `page`, where they see the post as its readers will and can publish it themselves, and get their
    go-ahead. A new method is `org`: the members of the organization it was made in read it (in a personal workspace,
    the user alone). `unlisted` is read by whoever has its address and is never listed; `public` by everyone. Pass the
    user's choice as `visibility` when saving the draft, or call `set_method_visibility` at any time. Never widen it
-   without asking.
-7. Call `publish_method` with the `revision` the draft returned. A published version cannot be changed.
+   without asking. Name the choices to the user as Intellite's screens do, in the user's language: 組織の中だけ / Organization
+   only (自分だけ / Only me in a personal workspace), 限定公開 / Unlisted, 公開 / Public.
+7. Call `publish_method` with the `revision` the draft returned, and give the user the post's `page`. A published
+   version cannot be changed.
 
 To update a method the user authors, save a draft with `base_version` set to the published version, a
 `change_note` that says what changed and why, and `attachments_from_previous` for files that stay the same. Then
