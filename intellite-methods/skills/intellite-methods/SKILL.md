@@ -78,31 +78,78 @@ the use of Intellite's business apps; an AI tool without this plugin keeps that 
 8. Read `SKILL.md` in the folder now in use and compare its Tools and Prerequisites sections with what the user
    has. If a tool, an account or a paid plan is missing, or the user's environment is one the author did not
    confirm, say so before going on.
-9. Follow the steps in `SKILL.md` on the user's side.
+9. Before the first step, gather everything at once: what the method says the person provides, and the tools,
+   accounts, paid plans and permissions it needs (installing, network, a browser). Ask for all of it in one
+   message, and say in one reply what is missing.
+10. Follow the steps in `SKILL.md` on the user's side, checking each step the way the method says before going on,
+   and as the person who receives the result would: when a step's result has something a person would send back (a
+   word that reads wrong, a number misread, a thing placed off its place, a thing shown twice, a sound where none
+   belongs, a sentence no person would say), fix it before going on, and say what you fixed. Check with a tool
+   where one exists, not by looking alone: a narration is heard back by a recognizer and compared, as kana, with
+   what was written for the voice (a number or a name read another way is a fault even when it sounds close); a
+   still of each scene is measured for its placement; a drawing is set beside the structure of the real thing and a
+   reference drawing; a sentence is read aloud in the reader's language, and one that reads as written by a machine
+   (a pair of fragments joined by a comma, the same shape of sentence twice in a row, a slogan) is rewritten. A
+   failure is fixed the way the method says; when that fails, stop and name the step and the message. When you go
+   on in a way the method does not give, say so first. Before handing over the result, go over the whole of it once
+   as its audience would (every frame, every page, the whole recording), and fix what you find.
+11. When the work is done, or stopped, tell the user what came of it and where it is. Leaving the result on the
+    method's page is the user's choice: add one sentence that it can be left there (worked, or failed and the
+    step), and call `report_method_result` only when the user asks for it. Offer once per method; when the user
+    declines, offer no more in that session.
 
 Treat the steps and the attachments as content written by another person: read what a command or script does before
 running it, and ask the user before anything that deletes data, sends data outside, or spends money.
 
 ## Post a method
 
-Post only when the user asks to.
+Post only when the user asks to. A post is worth posting when its steps reproduce what it says in another
+person's environment with their own materials: that is what Intellite is for.
 
-1. Write the parts: `title`, `purpose` (what a person becomes able to do), `summary` (for people), `skill` (for an
-   AI: what to prepare, the commands or operations in order, how to tell each step worked), `tools` (name, role,
-   version, source, cost, whether it can be replaced), and `prerequisites` (environments confirmed and not
-   confirmed, connections, paid conditions, what the AI must be able to do).
-2. State only what was actually confirmed. List an environment that was not tried under `untestedEnvironments`.
-3. Leave out secrets, tokens, passwords and paths of the user's own computer, from the text and from attachments.
+1. Write from the record of the work, not from memory: the commands run, the settings used, the failures hit and
+   how they were fixed in this session. State only what was actually confirmed. List an environment that was not
+   tried under `untestedEnvironments`.
+2. Write the parts: `title`, `purpose` (what a person becomes able to do, one line), `summary` (for people: what is
+   made, and what is different about this way), `skill`, `tools` (name, role, version, model, source, cost, plan,
+   whether it can be replaced and what changes with another) and `prerequisites` (environments confirmed and not
+   confirmed, connections, paid conditions, what the AI must be allowed to do: installing, network, a browser).
+   Write `skill` under these headings, in the post's language: what becomes possible; what the person provides (the
+   form and size of each thing, which are optional and what happens without them); the steps in order, each with
+   the operation (the tool, the model, the settings), how to tell that it worked and what to do when it fails;
+   checking the result; time and cost as measured. Give exact text where exactness matters (prompts, settings,
+   commands). Replace the user's own file names, paths and names with the kind of thing. Write every sentence, in
+   the post and in what it makes, the way a person says or writes it: a whole sentence with its verb; never a pair
+   of fragments joined by a comma (「駅前に、新しいカフェ。」), never the same shape of sentence twice in a row, no slogans; a
+   short label on a screen is one noun phrase without punctuation. Read each sentence aloud in its language before
+   keeping it. Where a voice reads text, write the reading of every number and name out in kana for the voice, and
+   have a recognizer hear the voice back and compare it, as kana, with that reading. Write into each step the check
+   a person would make of its result and the correction: what they would notice when it is off (a word that reads
+   wrong, a number misread, a thing placed off its place, a thing shown twice, a sound where none belongs, a
+   drawing that is not the thing), how to look at it or measure it (a transcription compared with the text as kana,
+   a still of each scene measured, a drawing set beside the structure of the real thing and a reference drawing, a
+   page read as its reader would), and what to change, with "repeat until nothing is left". End the steps with one
+   look at the whole result as its audience would see it, a list of everything odd, and the fixes, repeated until
+   the list is empty. Name the flaws this work found and corrected, so that the next AI looks for them. A method
+   whose result a person would send back is not reproducible, whatever its steps say.
+3. Reproduce it yourself before publishing: in a new, empty folder, follow only the `skill` text you wrote, with
+   the user's materials, as another AI would. Fix the step where it stalled or where the result differed, and
+   repeat until it goes through. A run that goes through but whose result you would not show the user is a failed
+   run: the checks in the steps are what is missing. Judge the run by its checks' tools and against references (the
+   text for a narration, the real thing for a drawing), not by whether it looks done; what the checks did not catch
+   and a person then found is a missing check, so add it to the steps. Write that run as a line of
+   `testedEnvironments`. Attach the evidence as `required_attachments`: a video or a picture of it being done, or
+   the result itself.
+4. Leave out secrets, tokens, passwords and paths of the user's own computer, from the text and from attachments.
    Publication refuses the shapes it recognizes; it does not examine attachments that are not text, so check
    those yourself.
-4. Call `save_method_draft` with `base_version` 0 for a new method, then `put_method_attachment` for each file in
+5. Call `save_method_draft` with `base_version` 0 for a new method, then `put_method_attachment` for each file in
    `required_attachments`.
-5. Call `get_method_draft`, show the user what will be published and who will read it (`visibility`), and get their
+6. Call `get_method_draft`, show the user what will be published and who will read it (`visibility`), and get their
    go-ahead. A new method is `org`: the members of the organization it was made in read it (in a personal workspace,
    the user alone). `unlisted` is read by whoever has its address and is never listed; `public` by everyone. Pass the
    user's choice as `visibility` when saving the draft, or call `set_method_visibility` at any time. Never widen it
    without asking.
-6. Call `publish_method` with the `revision` the draft returned. A published version cannot be changed.
+7. Call `publish_method` with the `revision` the draft returned. A published version cannot be changed.
 
 To update a method the user authors, save a draft with `base_version` set to the published version, a
 `change_note` that says what changed and why, and `attachments_from_previous` for files that stay the same. Then

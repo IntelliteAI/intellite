@@ -1,6 +1,20 @@
 #!/bin/sh
 # Starts the Intellite sync. sh runs this file (macOS, Linux, Git Bash); PowerShell runs intellite-sync.cmd.
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# At a prompt (UserPromptSubmit), the person never waits: what a sync in the background found is given once, and a
+# new sync is started in the background when ten minutes passed since the last one (the mark's time). Only sh runs
+# here; PowerShell or Perl starts in the background.
+if [ "$1" = "prompt" ]; then
+  case "$2" in claude|codex) ;; *) exit 0 ;; esac
+  root=${INTELLITE_SYNC_STATE:-$HOME/.intellite/sync}
+  report="$root/prompt-$2.json" mark="$root/prompt-$2.mark"
+  if [ -f "$report" ]; then cat "$report"; rm -f "$report"; fi
+  finder=/usr/bin/find; [ -x "$finder" ] || finder=find
+  if [ -f "$mark" ] && [ -n "$("$finder" "$mark" -mmin -10 2>/dev/null)" ]; then exit 0; fi
+  mkdir -p "$root" 2>/dev/null && : > "$mark"
+  nohup "$here/intellite-sync" prompt-run "$2" </dev/null >/dev/null 2>&1 &
+  exit 0
+fi
 case "$(uname -s 2>/dev/null)" in
   MINGW*|MSYS*|CYGWIN*)
     script="$here/sync.ps1"

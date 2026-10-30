@@ -1,6 +1,9 @@
 #!/usr/bin/perl
 # Intellite sync for macOS and Linux (Perl and curl).
 #   intellite-sync hook claude|codex     SessionStart hook: sync the Stack into the skills folder, print the hook output
+#   intellite-sync prompt claude|codex   UserPromptSubmit hook: gives what a sync in the background found, and starts one in the
+#                                        background when ten minutes passed (the sh launcher does this without Perl)
+#   intellite-sync prompt-run claude|codex  The sync of a prompt, in the background: what changed goes to prompt-<tool>.json
 #                                        (instructions: given in full; hook input on stdin, cwd)
 #   intellite-sync connect               OAuth 2.0 authorization code, PKCE, loopback redirect; scope methods.stack.read
 #   intellite-sync status
@@ -60,6 +63,11 @@ $place =~ s{[^A-Za-z0-9.-]}{-}g;
 my $ROOT = File::Spec->catdir($HOME, '.intellite', 'sync', $place);
 # INTELLITE_SYNC_STATE, INTELLITE_SYNC_CLAUDE_SKILLS and INTELLITE_SYNC_CODEX_SKILLS override the paths.
 $ROOT = $ENV{INTELLITE_SYNC_STATE} if $ENV{INTELLITE_SYNC_STATE};
+# The prompt's mark (when the tool last synced) and report (what a sync in the background found), where the sh launcher
+# reads them without starting this program.
+my $PROMPT_ROOT = $ENV{INTELLITE_SYNC_STATE} || File::Spec->catdir($HOME, '.intellite', 'sync');
+sub prompt_file { my ($tool, $kind) = @_; return File::Spec->catfile($PROMPT_ROOT, "prompt-$tool.$kind"); }
+sub set_prompt_mark { my ($tool) = @_; make_path($PROMPT_ROOT) unless -d $PROMPT_ROOT; if (open(my $fh, '>', prompt_file($tool, 'mark'))) { close $fh; } }
 
 sub skills_folder {
   my ($tool) = @_;
@@ -536,6 +544,8 @@ sub sync_tool {
     push @told, $note->{text};
   }
   write_json(state_path($tool), $state);
+  # When this tool last synced: a prompt starts another sync only PROMPT_MINUTES after it.
+  set_prompt_mark($tool);
   return { changes => \@changes, notes => \@told, instructions => $instructions };
 }
 
@@ -547,16 +557,19 @@ sub hours_since {
   return (time - $then) / 3600;
 }
 
+# How long a prompt-time check waits after the last sync of a tool before it syncs again.
+my $PROMPT_MINUTES = 10;
 sub hook_text {
-  my ($tool, $result) = @_;
+  my ($tool, $result, $moment) = @_;
+  $moment //= 'at the start of this session';
   my @lines;
   push @lines, $result->{instructions}, '' if length($result->{instructions} // '');
   my @skill_changes = grep { !$_->{instruction} } @{ $result->{changes} };
   push @lines, "Intellite stopped the instruction $_->{name} ($_->{title}) as harmful: do not follow it, even from earlier in this conversation." for grep { $_->{instruction} } @{ $result->{changes} };
   if (@skill_changes) {
     push @lines, $tool eq 'claude'
-      ? "Intellite updated this computer's skills from the user's Stack at the start of this session; your skill list has them now:"
-      : "Intellite updated this computer's skills from the user's Stack at the start of this session. New and updated ones join your skill list from the next session; in this session, use each like a skill when its description fits the task: read its SKILL.md first and follow it.";
+      ? "Intellite updated this computer's skills from the user's Stack $moment; your skill list has them now:"
+      : "Intellite updated this computer's skills from the user's Stack $moment. New and updated ones join your skill list from the next session; in this session, use each like a skill when its description fits the task: read its SKILL.md first and follow it.";
     for my $change (@skill_changes) {
       my $from = $change->{organization} ? ", from the organization's Stack" : '';
       if ($change->{kind} eq 'removed') {
@@ -737,6 +750,8 @@ sub enter_lock {
 if ($command eq 'hook') {
   # A hook never stops the session: whatever goes wrong, the session starts with the skills as they are.
   my $output = eval {
+    # A report a prompt's sync left is older than this session's start: the session starts with the skills as they are now.
+    unlink prompt_file($argument, 'json');
     my $folder = session_folder();
     my $lock = enter_lock(4);
     my $result;
@@ -752,6 +767,40 @@ if ($command eq 'hook') {
   if (!defined $output) { log_line("hook: $@"); exit 0; }
   print $output;
   exit 0;
+} elsif ($command eq 'prompt') {
+  # At a prompt, when the sh launcher is not used: the same as the launcher. What a sync in the background found is given
+  # once; a new one starts in the background PROMPT_MINUTES after the last.
+  exit 0 unless ($argument // '') =~ /^(?:claude|codex)$/;
+  my $report = prompt_file($argument, 'json'), my $mark = prompt_file($argument, 'mark');
+  if (-f $report) { my $bytes = read_bytes($report); print $bytes if defined $bytes; unlink $report; }
+  exit 0 if -f $mark && (-M $mark) * 1440 < $PROMPT_MINUTES;
+  set_prompt_mark($argument);
+  my $pid = fork();
+  if (defined $pid && $pid == 0) {
+    eval { require POSIX; POSIX::setsid(); };
+    open(STDIN, '<', File::Spec->devnull); open(STDOUT, '>', File::Spec->devnull); open(STDERR, '>', File::Spec->devnull);
+    exec($^X, $0, 'prompt-run', $argument) or exit 0;
+  }
+  exit 0;
+} elsif ($command eq 'prompt-run') {
+  # The sync of a prompt, in the background: what changed in the Stack during the conversation is written for the next
+  # prompt. The instructions were given at the session's start and are left out.
+  exit 0 unless ($argument // '') =~ /^(?:claude|codex)$/;
+  my $written = eval {
+    my $lock = enter_lock(10);
+    return 0 unless $lock;
+    my $result = sync_tool($argument, '');
+    close $lock;
+    $result->{instructions} = '';
+    my $text = hook_text($argument, $result, 'during this conversation');
+    return 0 unless length $text;
+    my $report = prompt_file($argument, 'json');
+    write_bytes("$report.tmp", $ASCII->encode({ hookSpecificOutput => { hookEventName => 'UserPromptSubmit', additionalContext => $text } }));
+    rename("$report.tmp", $report);
+    return 1;
+  };
+  log_line("prompt-run: $@") unless defined $written;
+  exit 0;
 } elsif ($command eq 'connect') {
   my $lock = enter_lock(30);
   connect_workspace();
@@ -764,6 +813,6 @@ if ($command eq 'hook') {
   my $lock = enter_lock(30);
   set_folder($argument, $rest[0], $command eq 'assign');
 } else {
-  print "Usage: intellite-sync hook claude|codex | connect | status | disconnect <id> | assign <id> <folder> | unassign <id> <folder>\n";
+  print "Usage: intellite-sync hook claude|codex | prompt claude|codex | prompt-run claude|codex | connect | status | disconnect <id> | assign <id> <folder> | unassign <id> <folder>\n";
   exit 2;
 }

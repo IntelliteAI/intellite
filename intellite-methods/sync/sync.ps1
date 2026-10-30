@@ -1,5 +1,8 @@
 # Intellite sync for Windows (Windows PowerShell 5.1 or later).
 #   intellite-sync hook claude|codex     SessionStart hook: sync the Stack into the skills folder, print the hook output
+#   intellite-sync prompt claude|codex   UserPromptSubmit hook: gives what a sync in the background found, and starts one in the
+#                                        background when ten minutes passed (the sh launcher does this without PowerShell)
+#   intellite-sync prompt-run claude|codex  The sync of a prompt, in the background: what changed goes to prompt-<tool>.json
 #                                        (instructions: given in full; hook input on stdin, cwd)
 #   intellite-sync connect               OAuth 2.0 authorization code, PKCE, loopback redirect; scope methods.stack.read
 #   intellite-sync status
@@ -41,6 +44,14 @@ $Place = ($Issuer -replace '^https?://', '') -replace '[^A-Za-z0-9.-]', '-'
 $Root = Join-Path $Home_ ".intellite\sync\$Place"
 # INTELLITE_SYNC_STATE, INTELLITE_SYNC_CLAUDE_SKILLS and INTELLITE_SYNC_CODEX_SKILLS override the paths.
 if ($env:INTELLITE_SYNC_STATE) { $Root = $env:INTELLITE_SYNC_STATE }
+# The prompt's mark (when the tool last synced) and report (what a sync in the background found), where the sh launcher
+# and the Windows hook read them without starting this program.
+$PromptRoot = Join-Path $Home_ ".intellite\sync"
+if ($env:INTELLITE_SYNC_STATE) { $PromptRoot = $env:INTELLITE_SYNC_STATE }
+function Set-PromptMark([string]$Tool) {
+  New-Item -ItemType Directory -Force $PromptRoot | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $PromptRoot "prompt-$Tool.mark"), "")
+}
 
 function Get-SkillsFolder([string]$Tool) {
   if ($Tool -eq "claude" -and $env:INTELLITE_SYNC_CLAUDE_SKILLS) { return $env:INTELLITE_SYNC_CLAUDE_SKILLS }
@@ -471,6 +482,8 @@ function Sync-Tool([string]$Tool, [string]$SessionFolder) {
     [void]$told.Add($note.text)
   }
   Write-Json (Join-Path $Root "state-$Tool.json") $state
+  # When this tool last synced: a prompt starts another sync only PromptMinutes after it.
+  Set-PromptMark $Tool
   return @{ changes = $changes; notes = $told; instructions = $instructions }
 }
 
@@ -484,14 +497,16 @@ function Get-ProgramCommand {
   return "& `"$(Join-Path $here 'intellite-sync.cmd')`""
 }
 
-function Get-HookText([string]$Tool, $Result) {
+# How long a prompt-time check waits after the last sync of a tool before it syncs again.
+$PromptMinutes = 10
+function Get-HookText([string]$Tool, $Result, [string]$Moment = "at the start of this session") {
   $lines = New-Object System.Collections.ArrayList
   if ($Result.instructions) { [void]$lines.Add($Result.instructions); [void]$lines.Add("") }
   $skillChanges = @($Result.changes | Where-Object { -not $_.instruction })
   foreach ($change in @($Result.changes | Where-Object { $_.instruction })) { [void]$lines.Add("Intellite stopped the instruction $($change.name) ($($change.title)) as harmful: do not follow it, even from earlier in this conversation.") }
   if ($skillChanges.Count -gt 0) {
-    if ($Tool -eq "claude") { [void]$lines.Add("Intellite updated this computer's skills from the user's Stack at the start of this session; your skill list has them now:") }
-    else { [void]$lines.Add("Intellite updated this computer's skills from the user's Stack at the start of this session. New and updated ones join your skill list from the next session; in this session, use each like a skill when its description fits the task: read its SKILL.md first and follow it.") }
+    if ($Tool -eq "claude") { [void]$lines.Add("Intellite updated this computer's skills from the user's Stack $Moment; your skill list has them now:") }
+    else { [void]$lines.Add("Intellite updated this computer's skills from the user's Stack $Moment. New and updated ones join your skill list from the next session; in this session, use each like a skill when its description fits the task: read its SKILL.md first and follow it.") }
     foreach ($change in $skillChanges) {
       $from = ""
       if ($change.organization) { $from = ", from the organization's Stack" }
@@ -685,6 +700,8 @@ switch ($Command) {
   "hook" {
     # A hook never stops the session: whatever goes wrong, the session starts with the skills as they are.
     try {
+      # A report a prompt's sync left is older than this session's start: the session starts with the skills as they are now.
+      Remove-Item -LiteralPath (Join-Path $PromptRoot "prompt-$Argument.json") -Force -ErrorAction SilentlyContinue
       $sessionFolder = Get-SessionFolder
       $lock = Enter-Lock 4
       if ($lock) { try { $result = Sync-Tool $Argument $sessionFolder } finally { $lock.Dispose() } }
@@ -697,10 +714,39 @@ switch ($Command) {
       [Console]::Out.Write((ConvertTo-AsciiJson @{ hookSpecificOutput = $output }))
     } catch { Write-Log "hook: $($_.Exception.Message)"; exit 0 }
   }
+  "prompt" {
+    # At a prompt, when the sh launcher is not used (PowerShell runs intellite-sync.cmd): the same as the launcher. What a
+    # sync in the background found is given once; a new one starts in the background PromptMinutes after the last.
+    try {
+      if ($Argument -ne "claude" -and $Argument -ne "codex") { exit 0 }
+      $report = Join-Path $PromptRoot "prompt-$Argument.json"; $mark = Join-Path $PromptRoot "prompt-$Argument.mark"
+      if (Test-Path -LiteralPath $report) { [Console]::Out.Write([System.IO.File]::ReadAllText($report)); Remove-Item -LiteralPath $report -Force }
+      if ((Test-Path -LiteralPath $mark) -and ([DateTime]::UtcNow - (Get-Item -LiteralPath $mark).LastWriteTimeUtc).TotalMinutes -lt $PromptMinutes) { exit 0 }
+      Set-PromptMark $Argument
+      Start-Process -WindowStyle Hidden -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "prompt-run", $Argument) | Out-Null
+    } catch { Write-Log "prompt: $($_.Exception.Message)"; exit 0 }
+  }
+  "prompt-run" {
+    # The sync of a prompt, in the background: what changed in the Stack during the conversation is written for the next
+    # prompt (Claude Code reads a changed skill folder as it changes; Codex is told the file). The instructions were given
+    # at the session's start and are left out.
+    try {
+      if ($Argument -ne "claude" -and $Argument -ne "codex") { exit 0 }
+      $lock = Enter-Lock 10
+      if (-not $lock) { exit 0 }
+      try { $result = Sync-Tool $Argument "" } finally { $lock.Dispose() }
+      $result.instructions = ""
+      $text = Get-HookText $Argument $result "during this conversation"
+      if (-not $text) { exit 0 }
+      $report = Join-Path $PromptRoot "prompt-$Argument.json"
+      [System.IO.File]::WriteAllText("$report.tmp", (ConvertTo-AsciiJson @{ hookSpecificOutput = @{ hookEventName = "UserPromptSubmit"; additionalContext = $text } }))
+      Move-Item -LiteralPath "$report.tmp" -Destination $report -Force
+    } catch { Write-Log "prompt-run: $($_.Exception.Message)"; exit 0 }
+  }
   "connect" { $lock = Enter-Lock 30; try { Connect-Workspace } finally { if ($lock) { $lock.Dispose() } } }
   "disconnect" { $lock = Enter-Lock 30; try { Disconnect-Workspace $Argument } finally { if ($lock) { $lock.Dispose() } } }
   "status" { Show-Status }
   "assign" { $lock = Enter-Lock 30; try { Set-Folder $Argument $Folder $true } finally { if ($lock) { $lock.Dispose() } } }
   "unassign" { $lock = Enter-Lock 30; try { Set-Folder $Argument $Folder $false } finally { if ($lock) { $lock.Dispose() } } }
-  default { Write-Output "Usage: intellite-sync hook claude|codex | connect | status | disconnect <id> | assign <id> <folder> | unassign <id> <folder>"; exit 2 }
+  default { Write-Output "Usage: intellite-sync hook claude|codex | prompt claude|codex | prompt-run claude|codex | connect | status | disconnect <id> | assign <id> <folder> | unassign <id> <folder>"; exit 2 }
 }

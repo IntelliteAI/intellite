@@ -1,5 +1,5 @@
 {
-  "description": "Intellite Stack sync and instructions (SessionStart).",
+  "description": "Intellite Stack sync and instructions (SessionStart), and the Stack's changes during a conversation (UserPromptSubmit).",
   "hooks": {
     "SessionStart": [
       {
@@ -9,6 +9,17 @@
             "type": "command",
             "command": "cd \"${CLAUDE_PLUGIN_ROOT}/sync\"; ./intellite-sync hook claude",
             "timeout": 20
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${CLAUDE_PLUGIN_ROOT}/sync\"; ./intellite-sync prompt claude",
+            "timeout": 5
           }
         ]
       }

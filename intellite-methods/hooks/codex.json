@@ -1,5 +1,5 @@
 {
-  "description": "Intellite Stack sync and instructions (SessionStart).",
+  "description": "Intellite Stack sync and instructions (SessionStart), and the Stack's changes during a conversation (UserPromptSubmit).",
   "hooks": {
     "SessionStart": [
       {
@@ -11,6 +11,20 @@
             "commandWindows": "cd \"$env:PLUGIN_ROOT/sync\"; ./intellite-sync hook codex",
             "timeout": 20,
             "additionalContextLimit": 12000,
+            "statusMessage": "Intellite sync"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$PLUGIN_ROOT/sync\" && ./intellite-sync prompt codex",
+            "commandWindows": "$r = if ($env:INTELLITE_SYNC_STATE) { $env:INTELLITE_SYNC_STATE } else { Join-Path $HOME '.intellite\\sync' }; $j = Join-Path $r 'prompt-codex.json'; if (Test-Path -LiteralPath $j) { [Console]::Out.Write([IO.File]::ReadAllText($j)); Remove-Item -LiteralPath $j -Force }; $m = Join-Path $r 'prompt-codex.mark'; if ((Test-Path -LiteralPath $m) -and ([DateTime]::UtcNow - (Get-Item -LiteralPath $m).LastWriteTimeUtc).TotalMinutes -lt 10) { exit 0 }; New-Item -ItemType Directory -Force $r | Out-Null; [IO.File]::WriteAllText($m, ''); Start-Process -WindowStyle Hidden -FilePath powershell.exe -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ('\"' + (Join-Path $env:PLUGIN_ROOT 'sync\\sync.ps1') + '\"'), 'prompt-run', 'codex') | Out-Null",
+            "timeout": 5,
+            "additionalContextLimit": 4000,
             "statusMessage": "Intellite sync"
           }
         ]
