@@ -206,10 +206,12 @@ organization, or stopped as harmful (those even when the connection has ended).
 2. While the sync is connected, leave placing, replacing and removing those folders to it: decide updates with
    `decide_method_update` (or leave them to the organization's administrators), and the files follow at the next
    session. Do not edit those folders: the sync no longer updates or removes one that was edited.
-3. When the start of a session says that Intellite is not connected on this computer, or that a connection ended,
-   offer to connect; with the user's consent, run the command it gives. It opens Intellite's consent page, where the
-   user chooses their own workspace or an organization (one connection each), and waits up to 5 minutes for the
-   approval, so give it a timeout of at least 5 minutes. The same program has `status` and `disconnect <id>`.
+3. When the start of a session gives an address to connect this computer to Intellite, give it to the user in your
+   first reply, as it says: the user opens it, chooses their own workspace or an organization (one connection each)
+   and approves, and the next message says what came in. When it says a connection ended, or the user asks to
+   connect later, run the command it gives, with the user's consent: it opens Intellite's consent page and waits up
+   to 5 minutes for the approval, so give it a timeout of at least 5 minutes. When the AI tool refuses to run it,
+   tell the user to type the command after `!` themselves. The same program has `status` and `disconnect <id>`.
 4. In Codex, the plugin's hook runs only after the user trusted it once (Settings, Hooks in the app; `/hooks` in the
    CLI). If the skills never come in, tell the user so.
 5. The sync also gives the Stack's instructions (next section) at the start of every session and again after the
@@ -217,6 +219,9 @@ organization, or stopped as harmful (those even when the connection has ended).
    organization's instructions are given only in the folders assigned to it: when the start of a session says this
    folder is not assigned, ask the user which organization the work is for, and with their consent run the `assign`
    command it gives.
+6. Every person's Stack begins with Intellite's own post on how to use Intellite (its SKILL.md names the author
+   Intellite). It carries the current version of these steps: where it and this skill differ, follow it. A newer
+   version of it comes in as any other post's does, when the user adopts it.
 
 ## Instructions
 

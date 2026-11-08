@@ -13,6 +13,8 @@
 # ASCII only: Windows PowerShell 5.1 reads a script without a byte order mark in the ANSI code page.
 param([Parameter(Position = 0)][string]$Command = "status", [Parameter(Position = 1)][string]$Argument = "", [Parameter(Position = 2)][string]$Folder = "", [switch]$NoBrowser)
 $ErrorActionPreference = "Stop"
+# INTELLITE_SYNC_NO_BROWSER=1 prints the consent page instead of opening it (a computer without a desktop browser).
+if ($env:INTELLITE_SYNC_NO_BROWSER -eq "1") { $NoBrowser = [switch]$true }
 $ProgressPreference = "SilentlyContinue"
 Add-Type -AssemblyName System.Net.Http
 Add-Type -AssemblyName System.Security
@@ -357,6 +359,22 @@ function Install-Skill([string]$SkillsFolder, $Skill, $Bundle, $State) {
   }
 }
 
+# An app's skill that the retired Intellite CLI put in place (until 2026-09-06), under the app's own name: it never changes
+# again, so once the app's skill comes in the list (intellite-app-<app id>), the old folder is taken out, into the record's
+# folder of removed skills. Only a folder marked as Intellite's (.intellite-managed.json), never a link.
+function Remove-RetiredAppSkill([string]$AppId) {
+  if ($AppId -notmatch '^[a-z0-9]+(-[a-z0-9]+)*$') { return @() }
+  $taken = @()
+  foreach ($folder in @((Join-Path $Home_ ".codex\skills\$AppId"), (Join-Path $Home_ ".agents\skills\$AppId"), (Join-Path (Get-SkillsFolder "claude") $AppId))) {
+    $mark = Join-Path $folder ".intellite-managed.json"
+    if (-not (Test-Path -LiteralPath $mark -PathType Leaf) -or (Test-Link $folder)) { continue }
+    if ([System.IO.File]::ReadAllText($mark, $Utf8) -notmatch '"managedBy"\s*:\s*"intellite"') { continue }
+    Remove-SkillFolder $folder $true
+    $taken += $folder
+  }
+  return $taken
+}
+
 function Get-Description([string]$SkillFolder) {
   $path = Join-Path $SkillFolder "SKILL.md"
   if (-not (Test-Path -LiteralPath $path)) { return "" }
@@ -412,6 +430,9 @@ function Sync-Tool([string]$Tool, [string]$SessionFolder) {
       $kind = "added"
       if ($kept) { $kind = "updated" }
       [void]$changes.Add(@{ kind = $kind; name = [string]$skill.name; version = [int]$skill.version; title = [string]$skill.title; organization = [bool]$skill.organization; folder = $folder })
+      if (([string]$skill.methodId).StartsWith("app-")) {
+        foreach ($old in @(Remove-RetiredAppSkill ([string]$skill.methodId).Substring(4))) { Write-Log "retired app skill taken out: $old" }
+      }
     }
     # Taken out: what the list says to take out, and what this connection brought that the list no longer gives.
     $reasons = @{}
@@ -468,8 +489,10 @@ function Sync-Tool([string]$Tool, [string]$SessionFolder) {
   foreach ($connection in $connections) {
     if ($connection.ended) { [void]$notes.Add(@{ key = "ended-$($connection.id)"; daily = $true; text = "Intellite: updates of the skills from $($connection.label) stopped on this computer, because the connection ended (it ends after a time without use, or when it is stopped on Intellite). The skills already here stay and work at their versions. To resume, with the user's consent, run: $(Get-ConnectCommand)" }) }
   }
-  if ($connections.Count -eq 0 -and -not (Get-Field $state.notices "offered")) {
-    [void]$notes.Add(@{ key = "offered"; text = "Intellite can keep the user's Stack (the methods the user and their organization chose on Intellite) among this computer's skills, so that you use them without the user naming Intellite. It is not connected on this computer. When the user works with Intellite, offer it once; with their consent, run: $(Get-ConnectCommand) (it opens Intellite's consent page in the browser, where the user chooses their own workspace or an organization, and waits up to 5 minutes)." })
+  # Not connected: once a day, a page to connect waits in the background, and the AI gives the user its address.
+  $offered = Get-Field $state.notices "offered"
+  if ($connections.Count -eq 0 -and (-not $offered -or ($now - [DateTime]::Parse($offered).ToUniversalTime()).TotalHours -ge 20)) {
+    [void]$notes.Add(@{ key = "offered"; daily = $true; text = (Get-ConnectOffer $Tool) })
   }
 
   Save-Connections $connections
@@ -485,6 +508,29 @@ function Sync-Tool([string]$Tool, [string]$SessionFolder) {
   # When this tool last synced: a prompt starts another sync only PromptMinutes after it.
   Set-PromptMark $Tool
   return @{ changes = $changes; notes = $told; instructions = $instructions }
+}
+
+# A page to connect, waiting in the background for 15 minutes (connect-wait): its short address on this computer, or ""
+# when it could not start. One waits at a time; a later session gives the same address while it waits.
+function Start-ConnectWait([string]$Tool) {
+  $pending = Join-Path $Root "connect-pending.json"
+  $current = Read-Json $pending $null
+  if ($current -and $current.url -and $current.until -and [DateTime]::Parse([string]$current.until).ToUniversalTime() -gt [DateTime]::UtcNow.AddMinutes(2) -and (Get-Process -Id ([int]$current.pid) -ErrorAction SilentlyContinue)) { return [string]$current.url }
+  Remove-Item -LiteralPath $pending -Force -ErrorAction SilentlyContinue
+  try { Start-Process -WindowStyle Hidden -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "connect-wait", $Tool) | Out-Null } catch { return "" }
+  for ($i = 0; $i -lt 30; $i++) {
+    Start-Sleep -Milliseconds 150
+    $current = Read-Json $pending $null
+    if ($current -and $current.url) { return [string]$current.url }
+  }
+  return ""
+}
+
+function Get-ConnectOffer([string]$Tool) {
+  $about = "Intellite's plugin is installed, but this computer is not connected to Intellite yet, so the user's Stack (the methods the user and their organization chose on Intellite) is not among the skills."
+  $url = Start-ConnectWait $Tool
+  if ($url) { return "$about A page to connect waits for 15 minutes at $url . In your first reply of this session, before the task, give the user that address in one or two sentences in their language: they open it in the browser, choose their own workspace or an organization, and approve. Then ask whether to wait for the connection or to go on without it. When they approve, the methods come in and the next message tells you. Later, the user can connect with: $(Get-ConnectCommand)" }
+  return "$about In your first reply of this session, before you start the task, ask once whether to connect, in a sentence or two in the user's language, and wait for the answer; with their consent, run: $(Get-ConnectCommand) (it opens Intellite's consent page in the browser, where the user chooses their own workspace or an organization, and waits up to 5 minutes). When the command is refused, tell the user to type it after ! themselves."
 }
 
 function Get-ConnectCommand {
@@ -532,8 +578,19 @@ function Get-HookText([string]$Tool, $Result, [string]$Moment = "at the start of
 
 # --- connecting ------------------------------------------------------------------------------------------------------------
 
-function Connect-Workspace {
-  $BudgetSeconds = 600
+# The answer to one request of the browser on this computer; the request ends with it.
+function Send-Answer($Client, [string]$Status, [string]$Answer = "", [string]$Location = "") {
+  if (-not $Client) { return }
+  try {
+    $extra = ""
+    if ($Location) { $extra = "Location: $Location`r`n" }
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 $Status`r`n$($extra)Content-Type: text/plain; charset=utf-8`r`nContent-Length: $($Answer.Length)`r`nConnection: close`r`n`r`n$Answer")
+    $Client.GetStream().Write($bytes, 0, $bytes.Length)
+  } catch { } finally { $Client.Close() }
+}
+
+function Connect-Workspace([int]$Minutes = 5, [string]$PendingFile = "", [switch]$Background) {
+  $BudgetSeconds = 60 * $Minutes + 300
   New-Item -ItemType Directory -Force $Root | Out-Null
   $verifier = ConvertTo-Base64Url (Get-RandomBytes 32)
   $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -546,34 +603,43 @@ function Connect-Workspace {
     $redirect = "http://127.0.0.1:$port/callback"
     $query = @{ response_type = "code"; client_id = $ClientId; redirect_uri = $redirect; scope = $Scope; state = $state; code_challenge = $challenge; code_challenge_method = "S256"; resource = $Resource }
     $url = "$Issuer/oauth/authorize?" + (($query.Keys | ForEach-Object { "$_=" + [Uri]::EscapeDataString($query[$_]) }) -join "&")
-    Write-Output "Open this page and approve, choosing your own workspace or an organization:"
-    Write-Output $url
-    if (-not $NoBrowser) { try { Start-Process $url } catch { } }
+    $deadline = [DateTime]::UtcNow.AddMinutes($Minutes)
+    # The short address on this computer leads to the consent page (it waits as long as this does).
+    if ($PendingFile) { Write-Json $PendingFile ([pscustomobject]@{ url = "http://127.0.0.1:$port/"; until = $deadline.ToString("o"); pid = $PID }) }
+    if (-not $Background) {
+      Write-Output "Open this page and approve, choosing your own workspace or an organization:"
+      Write-Output $url
+      if (-not $NoBrowser) { try { Start-Process $url } catch { } }
+    }
     $code = ""
-    $deadline = [DateTime]::UtcNow.AddMinutes(5)
+    $held = $null
     while (-not $code -and [DateTime]::UtcNow -lt $deadline) {
       if (-not $listener.Pending()) { Start-Sleep -Milliseconds 200; continue }
       $client = $listener.AcceptTcpClient()
+      $line = ""
       try {
         $stream = $client.GetStream()
         $stream.ReadTimeout = 5000
         $reader = New-Object System.IO.StreamReader $stream, ([System.Text.Encoding]::ASCII)
         $line = $reader.ReadLine()
-        $answer = "Intellite: you can close this tab."
-        $status = "200 OK"
-        if ($line -match '^GET /callback\?([^ ]*) HTTP') {
-          $values = @{}
-          foreach ($pair in $Matches[1].Split("&")) { $parts = $pair.Split("=", 2); if ($parts.Count -eq 2) { $values[$parts[0]] = [Uri]::UnescapeDataString($parts[1].Replace("+", " ")) } }
-          if ($values["state"] -ne $state) { $answer = "Intellite: this answer was not for this request."; $status = "400 Bad Request" }
-          elseif ($values["error"]) { $answer = "Intellite: not connected ($($values['error']))."; $deadline = [DateTime]::UtcNow }
-          elseif ($values["code"]) { $code = $values["code"] }
-        } else { $status = "404 Not Found"; $answer = "" }
-        $bytes = [System.Text.Encoding]::ASCII.GetBytes("HTTP/1.1 $status`r`nContent-Type: text/plain; charset=utf-8`r`nContent-Length: $($answer.Length)`r`nConnection: close`r`n`r`n$answer")
-        $stream.Write($bytes, 0, $bytes.Length)
-      } catch { } finally { $client.Close() }
+        # The rest of the request is read before the answer: a socket closed with unread bytes is reset, and the browser
+        # shows an error instead of the answer.
+        while ($true) { $header = $reader.ReadLine(); if ($null -eq $header -or $header -eq "") { break } }
+      } catch { }
+      if ($line -match '^GET / HTTP') { Send-Answer $client "302 Found" "" $url }
+      elseif ($line -match '^GET /callback\?([^ ]*) HTTP') {
+        $values = @{}
+        foreach ($pair in $Matches[1].Split("&")) { $parts = $pair.Split("=", 2); if ($parts.Count -eq 2) { $values[$parts[0]] = [Uri]::UnescapeDataString($parts[1].Replace("+", " ")) } }
+        if ($values["state"] -ne $state) { Send-Answer $client "400 Bad Request" "Intellite: this answer was not for this request." }
+        elseif ($values["error"]) { Send-Answer $client "200 OK" "Intellite: not connected ($($values['error']))."; $deadline = [DateTime]::UtcNow }
+        # The browser waits for its answer until the connection is saved, so that the page it is then sent to shows it.
+        elseif ($values["code"]) { $code = $values["code"]; $held = $client }
+        else { Send-Answer $client "200 OK" "Intellite: you can close this tab." }
+      } else { Send-Answer $client "404 Not Found" }
     }
   } finally { $listener.Stop() }
-  if (-not $code) { throw "Not connected: no approval came back within 5 minutes." }
+  if (-not $code) { throw "Not connected: no approval came back within $Minutes minutes." }
+  try {
   $answer = Invoke-Http "POST" "$Issuer/oauth/token" "" @{ grant_type = "authorization_code"; code = $code; redirect_uri = $redirect; client_id = $ClientId; code_verifier = $verifier; resource = $Resource }
   if ($answer.Status -ne 200) {
     $reason = ""
@@ -586,6 +652,9 @@ function Connect-Workspace {
   $workspace = ($list.Body | ConvertFrom-Json).workspace
   $label = "the user's own Stack"
   if ($workspace.kind -eq "organization") { $label = "the organization's Stack ($($workspace.id))" }
+  $lock = $null
+  if ($Background) { $lock = Enter-Lock 30 }
+  try {
   $connections = New-Object System.Collections.ArrayList
   # One connection a workspace: connecting it again replaces the earlier one, whose refresh token is revoked.
   foreach ($connection in @(Get-Connections)) {
@@ -617,6 +686,9 @@ function Connect-Workspace {
       Write-Json $path $toolState
     }
   }
+  } finally { if ($lock) { $lock.Dispose() } }
+  Send-Answer $held "302 Found" "" "$Issuer/account/connections?done=connected"
+  } catch { Send-Answer $held "200 OK" "Intellite: $($_.Exception.Message)"; throw }
   Write-Output "Connected: $label. The skills come into Claude Code and Codex when a session starts."
 }
 
@@ -744,9 +816,32 @@ switch ($Command) {
     } catch { Write-Log "prompt-run: $($_.Exception.Message)"; exit 0 }
   }
   "connect" { $lock = Enter-Lock 30; try { Connect-Workspace } finally { if ($lock) { $lock.Dispose() } } }
+  "connect-wait" {
+    # Started by a session's hook: the page to connect waits for 15 minutes without the lock; after the approval, the
+    # Stack is synced and what came in is written for the next prompt.
+    $pending = Join-Path $Root "connect-pending.json"
+    try {
+      Connect-Workspace -Minutes 15 -PendingFile $pending -Background | Out-Null
+      Remove-Item -LiteralPath $pending -Force -ErrorAction SilentlyContinue
+      # The sync after the approval has a time of its own: the run's budget counts from its start, which the wait used.
+      $script:Started = [DateTime]::UtcNow
+      $script:BudgetSeconds = 60
+      if ($Argument -eq "claude" -or $Argument -eq "codex") {
+        $result = $null
+        $lock = Enter-Lock 30
+        if ($lock) { try { $result = Sync-Tool $Argument "" } finally { $lock.Dispose() } }
+        if ($result) {
+          $text = "The user approved the connection to Intellite on this computer just now. " + (Get-HookText $Argument $result "now")
+          $report = Join-Path $PromptRoot "prompt-$Argument.json"
+          [System.IO.File]::WriteAllText("$report.tmp", (ConvertTo-AsciiJson @{ hookSpecificOutput = @{ hookEventName = "UserPromptSubmit"; additionalContext = $text } }))
+          Move-Item -LiteralPath "$report.tmp" -Destination $report -Force
+        }
+      }
+    } catch { Write-Log "connect-wait: $($_.Exception.Message)"; Remove-Item -LiteralPath $pending -Force -ErrorAction SilentlyContinue }
+  }
   "disconnect" { $lock = Enter-Lock 30; try { Disconnect-Workspace $Argument } finally { if ($lock) { $lock.Dispose() } } }
   "status" { Show-Status }
   "assign" { $lock = Enter-Lock 30; try { Set-Folder $Argument $Folder $true } finally { if ($lock) { $lock.Dispose() } } }
   "unassign" { $lock = Enter-Lock 30; try { Set-Folder $Argument $Folder $false } finally { if ($lock) { $lock.Dispose() } } }
-  default { Write-Output "Usage: intellite-sync hook claude|codex | prompt claude|codex | prompt-run claude|codex | connect | status | disconnect <id> | assign <id> <folder> | unassign <id> <folder>"; exit 2 }
+  default { Write-Output "Usage: intellite-sync hook claude|codex | prompt claude|codex | prompt-run claude|codex | connect | connect-wait claude|codex | status | disconnect <id> | assign <id> <folder> | unassign <id> <folder>"; exit 2 }
 }

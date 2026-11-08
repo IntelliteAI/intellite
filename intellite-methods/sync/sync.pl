@@ -42,7 +42,8 @@ my $ASCII = JSON::PP->new->ascii->canonical;
 my ($command, $argument, @rest) = @ARGV;
 $command //= 'status';
 $argument //= '';
-my $no_browser = grep { $_ eq '--no-browser' || $_ eq '-NoBrowser' } ($argument, @rest);
+# INTELLITE_SYNC_NO_BROWSER=1 prints the consent page instead of opening it (a computer without a desktop browser).
+my $no_browser = ($ENV{INTELLITE_SYNC_NO_BROWSER} // '') eq '1' || grep { $_ eq '--no-browser' || $_ eq '-NoBrowser' } ($argument, @rest);
 $argument = '' if $argument eq '--no-browser' || $argument eq '-NoBrowser';
 
 sub issuer {
@@ -359,6 +360,25 @@ sub remove_skill_folder {
   } else { remove_tree($folder); }
 }
 
+# An app's skill that the retired Intellite CLI put in place (until 2026-09-06), under the app's own name: it never changes
+# again, so once the app's skill comes in the list (intellite-app-<app id>), the old folder is taken out, into the record's
+# folder of removed skills. Only a folder marked as Intellite's (.intellite-managed.json), never a link.
+sub remove_retired_app_skill {
+  my ($app_id) = @_;
+  return () unless $app_id =~ /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+  my @taken;
+  for my $folder (File::Spec->catdir($HOME, '.codex', 'skills', $app_id), File::Spec->catdir($HOME, '.agents', 'skills', $app_id), File::Spec->catdir(skills_folder('claude'), $app_id)) {
+    my $mark = File::Spec->catfile($folder, '.intellite-managed.json');
+    next unless -f $mark && !is_link($folder);
+    open(my $fh, '<:raw', $mark) or next;
+    local $/; my $text = <$fh>; close $fh;
+    next unless defined $text && $text =~ /"managedBy"\s*:\s*"intellite"/;
+    remove_skill_folder($folder, 1);
+    push @taken, $folder;
+  }
+  return @taken;
+}
+
 # Writes the files of one version into a new folder beside the skills, checks each against its SHA-256 and the version's
 # pin, and then puts the folder in place of the skill's. Returns '' when done, or why it was not.
 sub install_skill {
@@ -428,6 +448,37 @@ sub program_command {
 }
 sub connect_command { return program_command() . ' connect'; }
 
+# A page to connect, waiting in the background for 15 minutes (connect-wait): its short address on this computer, or ''
+# when it could not start. One waits at a time; a later session gives the same address while it waits.
+sub start_connect_wait {
+  my ($tool) = @_;
+  my $pending = File::Spec->catfile($ROOT, 'connect-pending.json');
+  my $current = read_json($pending, undef);
+  return $current->{url} if ref $current eq 'HASH' && $current->{url} && ($current->{until_epoch} // 0) > time + 120 && kill(0, $current->{pid} // 0);
+  unlink $pending;
+  my $pid = fork();
+  return '' unless defined $pid;
+  if ($pid == 0) {
+    eval { require POSIX; POSIX::setsid(); };
+    open(STDIN, '<', File::Spec->devnull); open(STDOUT, '>', File::Spec->devnull); open(STDERR, '>', File::Spec->devnull);
+    exec($^X, $0, 'connect-wait', $tool) or exit 0;
+  }
+  for (1 .. 30) {
+    select(undef, undef, undef, 0.15);
+    my $now = read_json($pending, undef);
+    return $now->{url} if ref $now eq 'HASH' && $now->{url};
+  }
+  return '';
+}
+
+sub connect_offer {
+  my ($tool) = @_;
+  my $about = "Intellite's plugin is installed, but this computer is not connected to Intellite yet, so the user's Stack (the methods the user and their organization chose on Intellite) is not among the skills.";
+  my $url = start_connect_wait($tool);
+  return "$about A page to connect waits for 15 minutes at $url . In your first reply of this session, before the task, give the user that address in one or two sentences in their language: they open it in the browser, choose their own workspace or an organization, and approve. Then ask whether to wait for the connection or to go on without it. When they approve, the methods come in and the next message tells you. Later, the user can connect with: " . connect_command() if $url;
+  return "$about In your first reply of this session, before you start the task, ask once whether to connect, in a sentence or two in the user's language, and wait for the answer; with their consent, run: " . connect_command() . " (it opens Intellite's consent page in the browser, where the user chooses their own workspace or an organization, and waits up to 5 minutes). When the command is refused, tell the user to type it after ! themselves.";
+}
+
 # --- one sync of one AI tool's skills -------------------------------------------------------------------------------------
 
 sub sync_tool {
@@ -477,6 +528,7 @@ sub sync_tool {
         next;
       }
       push @changes, { kind => ($kept ? 'updated' : 'added'), name => $skill->{name}, version => $skill->{version}, title => $skill->{title}, organization => $skill->{organization} ? 1 : 0, folder => $folder };
+      if (($skill->{methodId} // '') =~ /^app-(.+)$/) { log_line("retired app skill taken out: $_") for remove_retired_app_skill($1); }
     }
     # Taken out: what the list says to take out, and what this connection brought that the list no longer gives.
     my %reasons = map { ($_->{name} => $_->{reason}) } @{ $list->{remove} // [] };
@@ -530,8 +582,10 @@ sub sync_tool {
     next unless $connection->{ended};
     push @notes, { key => "ended-$connection->{id}", daily => 1, text => "Intellite: updates of the skills from $connection->{label} stopped on this computer, because the connection ended (it ends after a time without use, or when it is stopped on Intellite). The skills already here stay and work at their versions. To resume, with the user's consent, run: " . connect_command() };
   }
-  if (!@$connections && !$state->{notices}{offered}) {
-    push @notes, { key => 'offered', text => "Intellite can keep the user's Stack (the methods the user and their organization chose on Intellite) among this computer's skills, so that you use them without the user naming Intellite. It is not connected on this computer. When the user works with Intellite, offer it once; with their consent, run: " . connect_command() . " (it opens Intellite's consent page in the browser, where the user chooses their own workspace or an organization, and waits up to 5 minutes)." };
+  # Not connected: once a day, a page to connect waits in the background, and the AI gives the user its address.
+  my $offered = $state->{notices}{offered};
+  if (!@$connections && (!$offered || hours_since($offered) >= 20)) {
+    push @notes, { key => 'offered', daily => 1, text => connect_offer($tool) };
   }
 
   save_connections($connections);
@@ -590,8 +644,21 @@ sub hook_text {
 
 # --- connecting ------------------------------------------------------------------------------------------------------------
 
+# The answer to one request of the browser on this computer; the request ends with it. A browser that left meanwhile
+# does not stop the program.
+sub send_answer {
+  my ($client, $status, $answer, $location) = @_;
+  return unless $client;
+  local $SIG{PIPE} = 'IGNORE';
+  my $extra = $location ? "Location: $location\r\n" : '';
+  print $client "HTTP/1.1 $status\r\n${extra}Content-Type: text/plain; charset=utf-8\r\nContent-Length: " . length($answer) . "\r\nConnection: close\r\n\r\n$answer";
+  close $client;
+}
+
 sub connect_workspace {
-  $BUDGET = 600;
+  my (%opts) = @_;
+  my $minutes = $opts{minutes} // 5;
+  $BUDGET = 60 * $minutes + 300;
   ensure_dir($ROOT);
   my $verifier = encode_base64url(random_bytes(32));
   my $challenge = encode_base64url(Digest::SHA::sha256($verifier));
@@ -603,41 +670,54 @@ sub connect_workspace {
     code_challenge => $challenge, code_challenge_method => 'S256', resource => $RESOURCE);
   my $escape = sub { my ($value) = @_; $value =~ s/([^A-Za-z0-9\-._~])/sprintf('%%%02X', ord $1)/ge; return $value; };
   my $url = "$ISSUER/oauth/authorize?" . join('&', map { "$_=" . $escape->($query{$_}) } sort keys %query);
-  print "Open this page and approve, choosing your own workspace or an organization:\n$url\n";
-  STDOUT->flush;
-  if (!$no_browser) {
-    my $opener = $^O eq 'darwin' ? 'open' : 'xdg-open';
-    if (have($opener)) { my $pid = fork(); if (defined $pid && $pid == 0) { open(STDOUT, '>', File::Spec->devnull); open(STDERR, '>', File::Spec->devnull); exec($opener, $url); exit 0; } }
+  my ($code, $deadline) = ('', time + 60 * $minutes);
+  # The short address on this computer leads to the consent page (it waits as long as this does).
+  write_json($opts{pending}, { url => "http://127.0.0.1:$port/", until => strftime('%Y-%m-%dT%H:%M:%SZ', gmtime($deadline)), until_epoch => $deadline, pid => $$ }) if $opts{pending};
+  if (!$opts{background}) {
+    print "Open this page and approve, choosing your own workspace or an organization:\n$url\n";
+    STDOUT->flush;
+    if (!$no_browser) {
+      my $opener = $^O eq 'darwin' ? 'open' : 'xdg-open';
+      if (have($opener)) { my $pid = fork(); if (defined $pid && $pid == 0) { open(STDOUT, '>', File::Spec->devnull); open(STDERR, '>', File::Spec->devnull); exec($opener, $url); exit 0; } }
+    }
   }
-  my ($code, $deadline) = ('', time + 300);
   my $select = IO::Select->new($listener);
+  my $held;
   while (!$code && time < $deadline) {
     next unless $select->can_read(0.5);
     my $client = $listener->accept or next;
     my $line = '';
     my $client_select = IO::Select->new($client);
-    if ($client_select->can_read(5)) { $line = <$client> // ''; }
-    my ($status, $answer) = ('404 Not Found', '');
-    if ($line =~ m{^GET /callback\?(\S*) HTTP}) {
+    if ($client_select->can_read(5)) {
+      $line = <$client> // '';
+      # The rest of the request is read before the answer: a socket closed with unread bytes is reset.
+      while ($client_select->can_read(2)) { my $header = <$client>; last if !defined $header || $header =~ /^\r?\n$/; }
+    }
+    if ($line =~ m{^GET / HTTP}) { send_answer($client, '302 Found', '', $url); }
+    elsif ($line =~ m{^GET /callback\?(\S*) HTTP}) {
       my %values;
       for my $pair (split /&/, $1) { my ($key, $value) = split /=/, $pair, 2; next unless defined $value; $value =~ tr/+/ /; $value =~ s/%([0-9A-Fa-f]{2})/chr hex $1/ge; $values{$key} = $value; }
-      ($status, $answer) = ('200 OK', 'Intellite: you can close this tab.');
-      if (($values{state} // '') ne $state_value) { ($status, $answer) = ('400 Bad Request', 'Intellite: this answer was not for this request.'); }
-      elsif ($values{error}) { $answer = "Intellite: not connected ($values{error})."; $deadline = 0; }
-      elsif ($values{code}) { $code = $values{code}; }
+      if (($values{state} // '') ne $state_value) { send_answer($client, '400 Bad Request', 'Intellite: this answer was not for this request.'); }
+      elsif ($values{error}) { send_answer($client, '200 OK', "Intellite: not connected ($values{error})."); $deadline = 0; }
+      # The browser waits for its answer until the connection is saved, so that the page it is then sent to shows it.
+      elsif ($values{code}) { ($code, $held) = ($values{code}, $client); }
+      else { send_answer($client, '200 OK', 'Intellite: you can close this tab.'); }
     }
-    print $client "HTTP/1.1 $status\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " . length($answer) . "\r\nConnection: close\r\n\r\n$answer";
-    close $client;
+    else { send_answer($client, '404 Not Found', ''); }
   }
   close $listener;
-  die "Not connected: no approval came back within 5 minutes.\n" unless $code;
+  die "Not connected: no approval came back within $minutes minutes.\n" unless $code;
+  my $label;
+  my $connected = eval {
   my $answer = http('POST', "$ISSUER/oauth/token", form => { grant_type => 'authorization_code', code => $code, redirect_uri => $redirect, client_id => $CLIENT_ID, code_verifier => $verifier, resource => $RESOURCE });
   if ($answer->{status} != 200) { my $reason = (decode_json_text($answer->{body}) // {})->{error} // ''; die "Not connected: Intellite answered HTTP $answer->{status} $reason.\n"; }
   my $token = decode_json_text($answer->{body}) // {};
   my $list = http('GET', "$RESOURCE/skills", token => $token->{access_token});
   die "Connected, but the Stack could not be read (HTTP $list->{status}).\n" unless $list->{status} == 200;
   my $workspace = (decode_json_text($list->{body}) // {})->{workspace} // {};
-  my $label = ($workspace->{kind} // '') eq 'organization' ? "the organization's Stack ($workspace->{id})" : "the user's own Stack";
+  $label = ($workspace->{kind} // '') eq 'organization' ? "the organization's Stack ($workspace->{id})" : "the user's own Stack";
+  # The waiting in the background holds the lock only while it writes the connection.
+  my $lock = $opts{background} ? enter_lock(30) : undef;
   my (@kept, $replaced, @folders);
   # One connection a workspace: connecting it again replaces the earlier one, whose refresh token is revoked.
   for my $connection (@{ connections() }) {
@@ -668,6 +748,11 @@ sub connect_workspace {
       write_json(state_path($tool), $tool_state);
     }
   }
+  close $lock if $lock;
+  1;
+  };
+  if (!$connected) { my $error = $@ || "Not connected.\n"; (my $said = $error) =~ s/\s+$//; send_answer($held, '200 OK', "Intellite: $said"); die $error; }
+  send_answer($held, '302 Found', '', "$ISSUER/account/connections?done=connected");
   print "Connected: $label. The skills come into Claude Code and Codex when a session starts.\n";
 }
 
@@ -804,6 +889,30 @@ if ($command eq 'hook') {
 } elsif ($command eq 'connect') {
   my $lock = enter_lock(30);
   connect_workspace();
+} elsif ($command eq 'connect-wait') {
+  # Started by a session's hook: the page to connect waits for 15 minutes without the lock; after the approval, the Stack
+  # is synced and what came in is written for the next prompt.
+  my $pending = File::Spec->catfile($ROOT, 'connect-pending.json');
+  my $done = eval {
+    connect_workspace(minutes => 15, pending => $pending, background => 1);
+    unlink $pending;
+    # The sync after the approval has a time of its own: the run's budget counts from its start, which the wait used.
+    ($STARTED, $BUDGET) = (time, 60);
+    if (($argument // '') =~ /^(?:claude|codex)$/) {
+      my $lock = enter_lock(30);
+      if ($lock) {
+        my $result = sync_tool($argument, '');
+        close $lock;
+        my $text = "The user approved the connection to Intellite on this computer just now. " . hook_text($argument, $result, 'now');
+        my $report = prompt_file($argument, 'json');
+        write_bytes("$report.tmp", $ASCII->encode({ hookSpecificOutput => { hookEventName => 'UserPromptSubmit', additionalContext => $text } }));
+        rename("$report.tmp", $report);
+      }
+    }
+    1;
+  };
+  if (!$done) { log_line("connect-wait: $@"); unlink $pending; }
+  exit 0;
 } elsif ($command eq 'disconnect') {
   my $lock = enter_lock(30);
   disconnect_workspace($argument);
@@ -813,6 +922,6 @@ if ($command eq 'hook') {
   my $lock = enter_lock(30);
   set_folder($argument, $rest[0], $command eq 'assign');
 } else {
-  print "Usage: intellite-sync hook claude|codex | prompt claude|codex | prompt-run claude|codex | connect | status | disconnect <id> | assign <id> <folder> | unassign <id> <folder>\n";
+  print "Usage: intellite-sync hook claude|codex | prompt claude|codex | prompt-run claude|codex | connect | connect-wait claude|codex | status | disconnect <id> | assign <id> <folder> | unassign <id> <folder>\n";
   exit 2;
 }
